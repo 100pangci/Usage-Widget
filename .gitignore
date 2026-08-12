@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+*.spec
+
+# 敏感数据（HAR 含浏览器 cookie，绝不可入库）
+*.har
+cookie*.txt
+.usage-widget/
+
+# 会话记录
+session-*.md
+
+# 运行时生成
+config.json
+*.log
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
