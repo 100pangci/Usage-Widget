@@ -50,11 +50,15 @@ if errorlevel 1 exit /b 1
 
 echo [4/4] Copying external plugins to plugin\ ...
 robocopy "plugins" "dist\usage-widget\plugin" /E /XD __pycache__ .pytest_cache >nul
-if errorlevel 8 exit /b 1
+if errorlevel 8 (
+    echo ERROR: robocopy failed with code %errorlevel%
+    exit /b 1
+)
 
 echo.
 echo Done: dist\usage-widget\usage-widget.exe
 echo Plugins (external, editable without rebuild): dist\usage-widget\plugin
 echo Config dir: %APPDATA%\usage-widget
 echo Plugin data: %USERPROFILE%\.usage-widget\plugin
+exit /b 0
 endlocal

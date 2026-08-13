@@ -152,9 +152,14 @@ class SettingsDialog(QDialog):
             lambda result: self._on_workspaces(result),
         )
 
-    def _on_workspaces(self, workspaces):
+    def _on_workspaces(self, result):
         self._ws_detect_btn.setEnabled(True)
         self._ws_detect_btn.setText("检测")
+        status, workspaces = result
+        if status != "ok":
+            self._ws_combo.clear()
+            self._test_label.setText(f"工作区检测失败：{workspaces}")
+            return
         self._ws_combo.clear()
         if not workspaces:
             self._test_label.setText("没有检测到工作区")
