@@ -265,6 +265,8 @@ class _JSParser:
 
     def _number(self):
         m = re.match(r"-?\d+(\.\d+)?", self.s[self.i:])
+        if not m:
+            raise OpencodeError(f"无法解析数字 @{self.i}")
         self.i += m.end()
         return float(m.group(0)) if "." in m.group(0) else int(m.group(0))
 

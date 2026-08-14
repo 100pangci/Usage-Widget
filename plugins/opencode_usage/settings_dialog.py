@@ -190,7 +190,8 @@ class SettingsDialog(QDialog):
         if not path:
             return
         try:
-            text = open(path, encoding="utf-8", errors="replace").read().strip()
+            with open(path, encoding="utf-8", errors="replace") as f:
+                text = f.read().strip()
         except OSError as e:
             self._test_label.setText(f"读取失败: {e}")
             return
@@ -216,6 +217,7 @@ class SettingsDialog(QDialog):
         self._test_label.setText("测试中…")
         client = self._make_client()
         if client is None:
+            self._test_btn.setEnabled(True)
             return
 
         def task():
@@ -255,7 +257,8 @@ class SettingsDialog(QDialog):
             if cookie_text:
                 with open(cookie_path, "w", encoding="utf-8") as f:
                     f.write(cookie_text + "\n")
-                os.chmod(cookie_path, 0o600)
+                if os.name != "nt":
+                    os.chmod(cookie_path, 0o600)
             elif not os.path.isfile(cookie_path):
                 self._test_label.setText("请先粘贴 cookie 值")
                 return

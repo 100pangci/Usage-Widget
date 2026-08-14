@@ -43,7 +43,7 @@ class Config:
             try:
                 saved = json.loads(self.path.read_text(encoding="utf-8"))
                 self.data = _deep_merge(copy.deepcopy(DEFAULT_CONFIG), saved)
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError):
                 pass
         else:
             self.save()

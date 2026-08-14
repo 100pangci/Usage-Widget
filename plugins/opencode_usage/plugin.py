@@ -148,6 +148,13 @@ class OpencodeUsagePlugin(Plugin):
         self._ticker.setInterval(1000)
         self._ticker.timeout.connect(self._tick_countdown)
 
+    @staticmethod
+    def _sanitize_refresh_ms(value) -> int:
+        try:
+            return max(30000, int(value))
+        except (TypeError, ValueError):
+            return 60000
+
     # ---- 设置持久化 ----
 
     @property
@@ -166,13 +173,13 @@ class OpencodeUsagePlugin(Plugin):
                 log.warning("settings.json 解析失败，使用默认值")
         if not self.settings["timezone"]:
             self.settings["timezone"] = self._system_tz()
-        self.refresh_interval = max(30000, int(self.settings["refresh_interval_ms"]))
+        self.refresh_interval = self._sanitize_refresh_ms(self.settings["refresh_interval_ms"])
 
     def save_settings(self, new_settings: dict) -> None:
         self.settings.update(new_settings)
         self.settings_path.write_text(
             json.dumps(self.settings, ensure_ascii=False, indent=2), encoding="utf-8")
-        self.refresh_interval = max(30000, int(self.settings["refresh_interval_ms"]))
+        self.refresh_interval = self._sanitize_refresh_ms(self.settings["refresh_interval_ms"])
         self._client = None
 
     @staticmethod

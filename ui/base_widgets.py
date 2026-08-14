@@ -1,4 +1,5 @@
 """通用 UI 控件：插件分区可复用的基础部件。"""
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QProgressBar
 
 

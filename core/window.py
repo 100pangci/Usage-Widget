@@ -14,15 +14,15 @@ from ui.sections import SectionsContainer
 log = logging.getLogger("usage-widget.window")
 
 PANEL_STYLE = """
-#panel QLabel {{ color: #dfe3ea; }}
-#panel QToolButton {{ color: #dfe3ea; border: none; background: transparent; padding: 2px 6px; border-radius: 4px; }}
-#panel QToolButton:hover {{ background: rgba(255, 255, 255, 18); }}
-#panel QProgressBar {{
+#panel QLabel { color: #dfe3ea; }
+#panel QToolButton { color: #dfe3ea; border: none; background: transparent; padding: 2px 6px; border-radius: 4px; }
+#panel QToolButton:hover { background: rgba(255, 255, 255, 18); }
+#panel QProgressBar {
     background: rgba(255, 255, 255, 16);
     border: none;
     border-radius: 4px;
-}}
-#panel QProgressBar::chunk {{ background: #4f8cff; border-radius: 4px; }}
+}
+#panel QProgressBar::chunk { background: #4f8cff; border-radius: 4px; }
 """
 
 
@@ -40,7 +40,7 @@ class FloatingWindow(QWidget):
         self.config = config
         self.manager = plugin_manager
         self._drag_pos: QPoint | None = None
-        self._section_titles: list[str] = []
+        self._section_titles: list[tuple[str, str]] = []
 
         self.setWindowTitle("usage-widget")
         self.setWindowFlags(
@@ -106,8 +106,8 @@ class FloatingWindow(QWidget):
         wcfg = self.config.get("window", default={}) or {}
         base_w = int(wcfg.get("width", 300))
         base_h = int(wcfg.get("height", 200))
-        width = min(max(base_w, hint.width()), 480)
-        height = min(max(base_h, hint.height()), 900)
+        width = min(max(base_w, hint.width()), max(480, base_w))
+        height = min(max(base_h, hint.height()), max(900, base_h))
         self.setMinimumSize(0, 0)
         self.resize(width, height)
 
@@ -246,9 +246,6 @@ class FloatingWindow(QWidget):
         pos = self.config.get("window", "position", default=[])
         if pos and len(pos) == 2 and not self._is_wayland():
             self.move(int(pos[0]), int(pos[1]))
-
-    def _is_x11(self) -> bool:
-        return "xcb" in QGuiApplication.platformName()
 
     def _is_wayland(self) -> bool:
         return "wayland" in QGuiApplication.platformName()

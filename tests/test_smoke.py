@@ -71,3 +71,43 @@ def test_bad_plugin_skipped(tmp_path, config):
 def test_empty_plugin_dir(config, tmp_path):
     manager = PluginManager(config, plugins_dir=tmp_path)
     assert manager.load_all() == []
+
+
+def test_config_corrupted_encoding():
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "config.json")
+        with open(path, "wb") as f:
+            f.write(b"\xff\xfe\x00broken")
+        cfg = Config(path)
+        assert cfg.get("window", "opacity") == 0.92
+
+
+def test_rsc_parser_malformed_number():
+    from plugins.opencode_usage.api import OpencodeError, _JSParser
+
+    with pytest.raises(OpencodeError):
+        _JSParser("($R=>$R[0]={a:-x})").parse()
+
+
+def test_refresh_interval_sanitize():
+    from plugins.opencode_usage.plugin import OpencodeUsagePlugin
+
+    assert OpencodeUsagePlugin._sanitize_refresh_ms(1000) == 30000
+    assert OpencodeUsagePlugin._sanitize_refresh_ms("60000") == 60000
+    assert OpencodeUsagePlugin._sanitize_refresh_ms("abc") == 60000
+    assert OpencodeUsagePlugin._sanitize_refresh_ms(None) == 60000
+
+
+def test_base_widgets_smoke():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    from ui.base_widgets import BarGauge, TextRow
+
+    row = TextRow("CPU", "12%", "%")
+    row.set_value("33%")
+    gauge = BarGauge("mem", 42, "%")
+    gauge.set_value(120, "%")
+    assert gauge._bar.value() == 100
+    assert app is not None
