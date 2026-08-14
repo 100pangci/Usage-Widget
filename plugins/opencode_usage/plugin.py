@@ -373,7 +373,7 @@ class OpencodeUsagePlugin(Plugin):
         line.setStyleSheet("color: rgba(255,255,255,26);")
         lay.addWidget(line)
 
-        month_caption = QLabel("本月费用")
+        month_caption = QLabel("本月蹬了：")
         month_caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
         month_caption.setStyleSheet(f"font-size: 11px; color: {DIM}; letter-spacing: 1px;")
         lay.addWidget(month_caption)
