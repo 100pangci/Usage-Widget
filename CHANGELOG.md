@@ -1,5 +1,17 @@
 # Changelog
 
+## [v1.0.2] - 2026-08-27
+
+### 修复
+
+- **发行版（PyInstaller 打包）SSL 证书验证失败**（`CERTIFICATE_VERIFY_FAILED`）：
+  打包后系统 CA 证书路径不可用，改用 certifi 的 cacert.pem（新增 `certifi` 依赖，
+  构建时通过 `--hidden-import certifi` 收集进包）
+- **发行版 KDE 置顶失效**：PyInstaller bootloader 会把 `_internal/` 下的 Qt 库
+  写入子进程的 `LD_LIBRARY_PATH`，导致 `qdbus` 加载到版本不匹配的 Qt 库直接
+  崩溃；调用子进程时剔除 `_internal` 路径
+- 插件加载失败被静默跳过的问题：KWin 脚本加载失败的详细信息现在会写入日志
+
 ## [v1.0.1] - 2026-08-27
 
 ### 新增

@@ -15,6 +15,7 @@
 import json
 import logging
 import re
+import ssl
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -128,6 +129,20 @@ class Subscription:
 
 # ---- 工具 ----
 
+def _ssl_context() -> ssl.SSLContext:
+    """带 CA 证书的默认上下文。
+
+    PyInstaller 打包后系统证书路径不可用（CERTIFICATE_VERIFY_FAILED），
+    certifi 的 cacert.pem 会随打包一起收集（pyinstaller-hooks-contrib）。
+    """
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
 def _as_int(value) -> int:
     try:
         return int(value or 0)
@@ -198,7 +213,8 @@ class CommandCodeClient:
             handler = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
         else:
             handler = urllib.request.ProxyHandler({})
-        self._opener = urllib.request.build_opener(handler)
+        self._opener = urllib.request.build_opener(
+            urllib.request.HTTPSHandler(context=_ssl_context()), handler)
 
     def cookie_header(self) -> str:
         token, data = read_cookie_file(self.cookie_path)

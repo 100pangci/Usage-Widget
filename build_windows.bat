@@ -43,6 +43,7 @@ if "%MODE%"=="onefile" set "EXTRA=--onefile"
     --hidden-import configparser ^
     --hidden-import concurrent.futures ^
     --hidden-import winreg ^
+    --hidden-import certifi ^
     --exclude-module pytest ^
     %EXTRA% ^
     main.py

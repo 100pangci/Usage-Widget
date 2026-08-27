@@ -77,9 +77,18 @@ def _run_qdbus(args: list[str], timeout: float = 5.0) -> tuple[int, str]:
     if binary is None:
         log.debug("qdbus 不可用")
         return 1, ""
+    env = os.environ.copy()
+    ld = env.get("LD_LIBRARY_PATH")
+    if ld:
+        # PyInstaller bootloader 会把 _internal/ 下的 Qt 库放进
+        # LD_LIBRARY_PATH，子进程 qdbus 加载到版本不匹配的库会直接
+        # 崩溃（rc=1，stderr 报 version not found），需剔除
+        env["LD_LIBRARY_PATH"] = ":".join(
+            p for p in ld.split(":") if p and "_internal" not in p)
     try:
         proc = subprocess.run(
-            [binary, *args], capture_output=True, text=True, timeout=timeout)
+            [binary, *args], capture_output=True, text=True,
+            timeout=timeout, env=env)
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
         log.debug("qdbus 调用失败: %s", e)
         return 1, ""

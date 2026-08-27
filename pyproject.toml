@@ -4,11 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "usage-widget"
-version = "1.0.1"
+version = "1.0.2"
 description = "可拓展的悬浮窗监控框架"
 requires-python = ">=3.10"
 dependencies = [
     "PySide6>=6.5",
+    "certifi>=2023.7.22",
 ]
 
 [project.scripts]
