@@ -8,7 +8,7 @@ import tempfile
 
 from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QGuiApplication
-from PySide6.QtWidgets import QApplication, QMenu, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QLayout, QMenu, QVBoxLayout, QWidget
 
 from plugins.base import Plugin
 from ui.sections import SectionsContainer
@@ -114,6 +114,10 @@ class FloatingWindow(QWidget):
 
         self._container = SectionsContainer(self)
         self._container.setObjectName("panel")
+        # setVisible 触发的 LayoutRequest 是异步的，延迟一帧再按新内容
+        # 收缩窗口，否则 sizeHint 还是折叠前的旧值
+        self._container.layout_changed.connect(
+            lambda: QTimer.singleShot(0, lambda: self._fit_to_content(shrink=True)))
         alpha = self.config.get("window", "opacity", default=0.92)
         self._container.set_panel_colors(
             QColor(40, 45, 56, int(alpha * 255)),
@@ -122,6 +126,7 @@ class FloatingWindow(QWidget):
         self._container.setStyleSheet(PANEL_STYLE)
 
         fill = QVBoxLayout(self)
+        fill.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         fill.setContentsMargins(0, 0, 0, 0)
         fill.addWidget(self._container)
 
@@ -158,12 +163,13 @@ class FloatingWindow(QWidget):
         self._rebuild_menu()
         self._fit_to_content()
 
-    def _fit_to_content(self) -> None:
+    def _fit_to_content(self, shrink: bool = False) -> None:
         """无边框窗口无法手动缩放，按分区内容自适应尺寸。
 
-        以配置的基础尺寸为下限（内容增减时窗口都能收缩/伸展）。
-        注意：布局激活时会按内容设置窗口最小尺寸，收缩前必须先清掉旧的
-        最小尺寸约束，否则 resize 会被钳制住。
+        shrink=True 时（折叠/隐藏分区）高度下限用实际内容高度，
+        让窗口真正收缩；否则以配置的基础尺寸为下限（内容增减时
+        窗口都能收缩/伸展）。注意：布局激活时会按内容设置窗口最小
+        尺寸，收缩前必须先清掉旧的最小尺寸约束，否则 resize 会被钳制。
         """
         self._container.layout().activate()
         hint = self._container.sizeHint()
@@ -171,7 +177,8 @@ class FloatingWindow(QWidget):
         base_w = int(wcfg.get("width", 300))
         base_h = int(wcfg.get("height", 200))
         width = min(max(base_w, hint.width()), max(480, base_w))
-        height = min(max(base_h, hint.height()), max(900, base_h))
+        min_h = hint.height() if shrink else max(base_h, hint.height())
+        height = min(max(min_h, 0), max(900, base_h))
         self.setMinimumSize(0, 0)
         self.resize(width, height)
 
@@ -250,6 +257,9 @@ class FloatingWindow(QWidget):
 
         self._settings_menu.clear()
         for pid, plugin in self.manager.plugins.items():
+            if pid in hidden:
+                # 隐藏的分区不出现在设置菜单
+                continue
             if type(plugin).settings_dialog is Plugin.settings_dialog:
                 continue
             action = QAction(f"{plugin.name or pid}…", self._settings_menu)
@@ -269,7 +279,8 @@ class FloatingWindow(QWidget):
             hidden.append(pid)
         self.config.set("window", "hidden_sections", value=hidden)
         self.config.save()
-        self._fit_to_content()
+        self._rebuild_menu()
+        QTimer.singleShot(0, lambda: self._fit_to_content(shrink=True))
 
     def _open_plugin_settings(self, plugin) -> None:
         dialog = plugin.settings_dialog(self)

@@ -111,3 +111,27 @@ def test_base_widgets_smoke():
     gauge.set_value(120, "%")
     assert gauge._bar.value() == 100
     assert app is not None
+
+
+def test_section_collapse_signal():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QLabel
+
+    app = QApplication.instance() or QApplication([])
+    from ui.sections import SectionsContainer
+
+    container = SectionsContainer()
+    container.show()
+    app.processEvents()
+    fired = []
+    container.layout_changed.connect(lambda: fired.append(True))
+    section = container.add_section("test", "测试", QLabel("x"))
+    assert fired == []
+    section.toggle_collapse()
+    app.processEvents()
+    assert fired == [True]
+    assert not section._content.isVisible()
+    section.toggle_collapse()
+    app.processEvents()
+    assert len(fired) == 2
+    assert section._content.isVisible()

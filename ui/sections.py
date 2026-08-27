@@ -1,5 +1,5 @@
 """分区容器：垂直堆叠插件分区，支持折叠与整体布局。"""
-from PySide6.QtCore import QRectF, Qt
+from PySide6.QtCore import QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QFrame,
@@ -13,6 +13,8 @@ from PySide6.QtWidgets import (
 
 class Section(QFrame):
     """单个插件分区：可折叠标题栏 + 内容区。"""
+
+    collapsed_changed = Signal()
 
     def __init__(self, key: str, title: str, content: QWidget, parent=None):
         super().__init__(parent)
@@ -51,6 +53,7 @@ class Section(QFrame):
         self._collapsed = not self._collapsed
         self._content.setVisible(not self._collapsed)
         self._toggle.setText("▸" if self._collapsed else "▾")
+        self.collapsed_changed.emit()
 
 
 class SectionsContainer(QWidget):
@@ -59,6 +62,8 @@ class SectionsContainer(QWidget):
     面板背景用 QPainter 绘制（圆角 + 半透明）：Windows 分层窗口下
     QSS 的 rgba 背景不会合成上屏，但 paintEvent 的绘制可以。
     """
+
+    layout_changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -88,6 +93,7 @@ class SectionsContainer(QWidget):
 
     def add_section(self, key: str, title: str, content: QWidget) -> Section:
         section = Section(key, title, content, self)
+        section.collapsed_changed.connect(self.layout_changed.emit)
         self._lay.insertWidget(self._lay.count() - 1, section)
         self._sections.append(section)
         return section
