@@ -1,14 +1,16 @@
-"""opencode 用量插件：滚动/每周/每月用量与重置时间 + 本月费用。
+"""commandcode 用量插件：5小时/每周窗口用量、本月花费与剩余 credits。
 
 数据流（后台线程，不阻塞 UI）：
-    lite.subscription.get(ws) → 滚动/每周/每月用量百分比与重置倒计时
-    getCosts(本月)            → 本月费用（美元）
-配置持久化在插件数据目录 ~/.usage-widget/plugin/opencode_usage/settings.json
+    /internal/usage/summary          → 本月请求数/花费/tokens
+    /internal/billing/credits        → 剩余 credits + 5小时/每周窗口用量
+    /internal/billing/subscriptions  → 订阅计划与计费周期
+配置持久化在插件数据目录 ~/.usage-widget/plugin/commandcode/settings.json，
+cookie 由用户在设置对话框粘贴（保存到 cookie.txt）。
 """
 import json
 import logging
 import time
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QThread, QTimer, Qt, Signal
@@ -24,24 +26,27 @@ from PySide6.QtWidgets import (
 
 from plugins.base import Plugin
 
-from .api import OpencodeClient, OpencodeError
-from .format import format_reset_time, format_usd
+from .api import CommandCodeClient, CommandCodeError, Credits, Subscription, UsageSummary
+from .format import (
+    format_credits,
+    format_plan_name,
+    format_reset_time,
+    format_tokens,
+    format_usd,
+    plan_total_credits,
+)
 from .proxy import detect_proxy
 
-log = logging.getLogger("opencode.plugin")
+log = logging.getLogger("commandcode.plugin")
 
 DEFAULT_SETTINGS = {
     "cookie_path": "",          # 保存到 data_dir/cookie.txt（见 load_settings）
-    "workspace_id": "",         # 空则自动检测第一个工作区
     "proxy": "auto",            # auto / none / http://...
-    "sample_records": 500,      # 保留：历史设置兼容，不再使用
-    "refresh_interval_ms": 60000,  # 网站无流式推送，轮询；1 分钟一次，倒计时本地递减
-    "timezone": "",             # 空则取系统时区
+    "refresh_interval_ms": 60000,  # 轮询；1 分钟一次，倒计时本地递减
 }
 
 ACCENT = "#4f8cff"
 DIM = "#9aa3b5"
-TEXT = "#dfe3ea"
 GREEN = "#7cc76b"
 AMBER = "#e5b94d"
 RED = "#e06c5a"
@@ -84,22 +89,21 @@ class UsageBar(QWidget):
 
 
 class FetchWorker(QThread):
-    """后台拉取 + 统计，完成后发 ok/fail 信号。"""
+    """后台拉取汇总 + credits + 订阅，完成后发 ok/fail 信号。"""
 
     ok = Signal(object)
     fail = Signal(str)
 
-    def __init__(self, client, tz, parent=None):
+    def __init__(self, client, parent=None):
         super().__init__(parent)
         self._client = client
-        self._tz = tz
 
     def run(self):
         try:
             stats = self._fetch()
             if stats is not None and not self.isInterruptionRequested():
                 self.ok.emit(stats)
-        except OpencodeError as e:
+        except CommandCodeError as e:
             if not self.isInterruptionRequested():
                 self.fail.emit(str(e))
         except Exception as e:
@@ -109,30 +113,26 @@ class FetchWorker(QThread):
 
     def _fetch(self) -> dict | None:
         client = self._client
-
-        usage = client.subscription_usage()
+        summary = client.usage_summary()
         if self.isInterruptionRequested():
             return None
-
-        today = date.today()
-        costs = client.month_costs(today.year, today.month - 1, self._tz)
+        credits = client.credits()
         if self.isInterruptionRequested():
             return None
-
+        sub = client.subscription()
         return {
-            "rolling": usage.rolling,
-            "weekly": usage.weekly,
-            "monthly": usage.monthly,
-            "month_units": sum(c.cost_units for c in costs),
+            "summary": summary,
+            "credits": credits,
+            "subscription": sub,
             "fetched_at": datetime.now().strftime("%H:%M"),
         }
 
 
-class OpencodeUsagePlugin(Plugin):
-    id = "opencode_usage"
-    name = "opencode 用量"
+class CommandCodePlugin(Plugin):
+    id = "commandcode"
+    name = "commandcode 用量"
     version = "0.1.0"
-    description = "滚动/每周/每月用量与重置时间、本月费用"
+    description = "5小时/每周用量、本月花费与剩余 credits"
     refresh_interval = 60000
 
     def __init__(self, context=None):
@@ -141,9 +141,9 @@ class OpencodeUsagePlugin(Plugin):
         self._client = None
         self._worker = None
         self._labels = {}
-        # 重置倒计时本地递减：记录每次拉取时的剩余秒数与时间基准
-        self._reset_left: dict[str, int] = {}
-        self._base_time = 0.0
+        # 重置倒计时本地递减：记录窗口 resetAt（epoch 毫秒）与计费周期结束，每秒刷新
+        self._limits: dict[str, object] = {}
+        self._period_end_ms: int | None = None
         self._ticker = QTimer(self)
         self._ticker.setInterval(1000)
         self._ticker.timeout.connect(self._tick_countdown)
@@ -164,15 +164,12 @@ class OpencodeUsagePlugin(Plugin):
     def load_settings(self) -> None:
         self.settings = dict(DEFAULT_SETTINGS)
         self.settings["cookie_path"] = str(self.data_dir / "cookie.txt")
-        self.settings["timezone"] = self._system_tz()
         if self.settings_path.is_file():
             try:
                 saved = json.loads(self.settings_path.read_text(encoding="utf-8"))
                 self.settings.update({k: v for k, v in saved.items() if k in DEFAULT_SETTINGS})
             except (json.JSONDecodeError, OSError):
                 log.warning("settings.json 解析失败，使用默认值")
-        if not self.settings["timezone"]:
-            self.settings["timezone"] = self._system_tz()
         self.refresh_interval = self._sanitize_refresh_ms(self.settings["refresh_interval_ms"])
 
     def save_settings(self, new_settings: dict) -> None:
@@ -181,13 +178,6 @@ class OpencodeUsagePlugin(Plugin):
             json.dumps(self.settings, ensure_ascii=False, indent=2), encoding="utf-8")
         self.refresh_interval = self._sanitize_refresh_ms(self.settings["refresh_interval_ms"])
         self._client = None
-
-    @staticmethod
-    def _system_tz() -> str:
-        offset = time.strftime("%z")  # 如 +0800
-        if len(offset) == 5:
-            return f"{offset[:3]}:{offset[3:]}"
-        return "+00:00"
 
     # ---- 客户端 ----
 
@@ -211,29 +201,11 @@ class OpencodeUsagePlugin(Plugin):
                 log.info("系统代理: %s", proxy or "无")
             elif self.settings["proxy"] != "none":
                 proxy = self.settings["proxy"]
-            self._client = OpencodeClient(
+            self._client = CommandCodeClient(
                 cookie_path=self.settings["cookie_path"],
-                workspace_id=self.settings["workspace_id"],
                 proxy=proxy,
             )
         return self._client
-
-    def resolve_workspace(self) -> str | None:
-        """设置里没填工作区时自动取第一个。"""
-        if self.settings["workspace_id"]:
-            return self.settings["workspace_id"]
-        client = self.make_client()
-        if client is None:
-            return None
-        try:
-            workspaces = client.workspaces()
-            if workspaces:
-                self.settings["workspace_id"] = workspaces[0].id
-                self.save_settings(self.settings)
-                return workspaces[0].id
-        except OpencodeError as e:
-            log.warning("自动获取工作区失败: %s", e)
-        return None
 
     # ---- 生命周期 ----
 
@@ -251,30 +223,21 @@ class OpencodeUsagePlugin(Plugin):
         if self._worker is not None:
             return
         if not self.cookie_configured():
-            self._set_status("未配置 cookie：右键 → 插件设置 填写后启用")
+            self._set_status("未配置 cookie：右键 → 插件设置 粘贴后启用")
             return
-        if self.settings["workspace_id"]:
-            self._start_fetch()
-        elif self.resolve_workspace():
-            self._start_fetch()
-        else:
-            self._set_status("工作区检测失败：右键 → 插件设置 手动填写")
-
-    def refresh_now(self) -> None:
-        self.tick()
-
-    def _start_fetch(self) -> None:
         client = self.make_client()
         if client is None:
-            self._set_status("未配置 cookie：右键 → 插件设置 填写后启用")
+            self._set_status("未配置 cookie：右键 → 插件设置 粘贴后启用")
             return
         self._set_status("获取中…")
-        self._worker = FetchWorker(
-            client, self.settings["timezone"], self)
+        self._worker = FetchWorker(client, self)
         self._worker.ok.connect(self._apply_stats)
         self._worker.fail.connect(self._apply_error)
         self._worker.finished.connect(self._on_worker_finished)
         self._worker.start()
+
+    def refresh_now(self) -> None:
+        self.tick()
 
     def _on_worker_finished(self) -> None:
         worker = self._worker
@@ -282,38 +245,72 @@ class OpencodeUsagePlugin(Plugin):
         if worker is not None:
             worker.deleteLater()
 
+    # ---- 数据落地 ----
+
     def _apply_stats(self, stats: dict) -> None:
         if not self._labels:
             return
-        self._reset_left = {
-            "rolling": stats["rolling"].reset_in_sec,
-            "weekly": stats["weekly"].reset_in_sec,
-            "monthly": stats["monthly"].reset_in_sec,
-        }
-        self._base_time = time.monotonic()
-        self._update_usage("rolling", stats["rolling"])
-        self._update_usage("weekly", stats["weekly"])
-        self._update_usage("monthly", stats["monthly"])
-        self._labels["month_value"].setText(format_usd(stats["month_units"]))
+        summary: UsageSummary = stats["summary"]
+        credits: Credits = stats["credits"]
+        sub: Subscription | None = stats["subscription"]
+
+        self._limits = {}
+        now_ms = int(time.time() * 1000)
+        for key, limit in (("five_hour", credits.five_hour), ("weekly", credits.weekly)):
+            percent = limit.percent if limit else 0
+            self._labels[f"{key}_bar"].set_percent(percent)
+            self._labels[f"{key}_pct"].setText(f"{percent}%")
+            self._labels[f"{key}_pct"].setStyleSheet(
+                f"font-size: 13px; font-weight: 700; color: {percent_color(percent)};")
+            self._labels[f"{key}_reset"].setText(
+                f"重置于 {format_reset_time(max(0, (limit.reset_at_ms - now_ms) // 1000))}"
+                if limit else "")
+            if limit:
+                self._limits[key] = limit
+
+        # 每月用量：总额 - 剩余 = 已用，重置时间 = 计费周期结束
+        total = plan_total_credits(sub.plan_id) if sub is not None else None
+        self._period_end_ms = None
+        if total and total > 0:
+            used = max(0.0, total - credits.monthly_remaining)
+            percent = int(used / total * 100)
+            self._labels["monthly_bar"].set_percent(percent)
+            self._labels["monthly_pct"].setText(f"{percent}%")
+            self._labels["monthly_pct"].setStyleSheet(
+                f"font-size: 13px; font-weight: 700; color: {percent_color(percent)};")
+            if sub is not None and sub.period_end is not None:
+                self._period_end_ms = int(sub.period_end.timestamp() * 1000)
+                left = max(0, (self._period_end_ms - now_ms) // 1000)
+                self._labels["monthly_reset"].setText(f"重置于 {format_reset_time(left)}")
+        else:
+            self._labels["monthly_bar"].set_percent(0)
+            self._labels["monthly_pct"].setText("--")
+            self._labels["monthly_pct"].setStyleSheet(
+                f"font-size: 13px; font-weight: 700; color: {DIM};")
+            self._labels["monthly_reset"].setText("")
+
+        self._labels["month_value"].setText(format_usd(summary.total_cost))
+        self._labels["stats"].setText(
+            f"{summary.total_count} 次请求 · {format_tokens(summary.total_tokens)} tokens")
+
+        if sub is not None:
+            self._labels["plan"].setText(format_plan_name(sub.plan_id))
+        else:
+            self._labels["plan"].setText("无订阅")
+
         self._set_status(f"更新 {stats['fetched_at']} · 代理 {'✓' if self._proxy_active() else '—'}")
 
     def _tick_countdown(self) -> None:
         """本地每秒递减重置倒计时（不重新请求网络）。"""
-        if not self._reset_left or "rolling_reset" not in self._labels:
+        if not self._limits and self._period_end_ms is None:
             return
-        elapsed = int(time.monotonic() - self._base_time)
-        for key in ("rolling", "weekly", "monthly"):
-            left = max(0, self._reset_left[key] - elapsed)
-            self._labels[f"{key}_reset"].setText(
-                f"重置于 {format_reset_time(left)}")
-
-    def _update_usage(self, key: str, level) -> None:
-        percent = level.usage_percent
-        self._labels[f"{key}_pct"].setText(f"{percent}%")
-        self._labels[f"{key}_pct"].setStyleSheet(
-            f"font-size: 13px; font-weight: 700; color: {percent_color(percent)};")
-        self._labels[f"{key}_bar"].set_percent(percent)
-        self._labels[f"{key}_reset"].setText(f"重置于 {format_reset_time(level.reset_in_sec)}")
+        now_ms = int(time.time() * 1000)
+        for key, limit in self._limits.items():
+            left = max(0, (limit.reset_at_ms - now_ms) // 1000)
+            self._labels[f"{key}_reset"].setText(f"重置于 {format_reset_time(left)}")
+        if self._period_end_ms is not None:
+            left = max(0, (self._period_end_ms - now_ms) // 1000)
+            self._labels["monthly_reset"].setText(f"重置于 {format_reset_time(left)}")
 
     def _apply_error(self, message: str) -> None:
         self._set_status(f"获取失败：{message}")
@@ -335,7 +332,7 @@ class OpencodeUsagePlugin(Plugin):
         lay.setContentsMargins(12, 4, 12, 8)
         lay.setSpacing(5)
 
-        def make_usage(key: str, label: str) -> None:
+        def make_window(key: str, label: str) -> None:
             name = QLabel(label)
             name.setStyleSheet(f"font-size: 12px; color: {DIM};")
             pct = QLabel("--")
@@ -364,9 +361,9 @@ class OpencodeUsagePlugin(Plugin):
             self._labels[f"{key}_bar"] = bar
             self._labels[f"{key}_reset"] = reset
 
-        make_usage("rolling", "滚动用量")
-        make_usage("weekly", "每周用量")
-        make_usage("monthly", "每月用量")
+        make_window("five_hour", "滚动用量")
+        make_window("weekly", "每周用量")
+        make_window("monthly", "每月用量")
 
         line = QFrame()
         line.setFrameShape(QFrame.Shape.HLine)
@@ -384,6 +381,18 @@ class OpencodeUsagePlugin(Plugin):
         lay.addWidget(month_value)
         self._labels["month_value"] = month_value
 
+        stats = QLabel("")
+        stats.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        stats.setStyleSheet(f"font-size: 11px; color: {DIM};")
+        lay.addWidget(stats)
+        self._labels["stats"] = stats
+
+        plan = QLabel("")
+        plan.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        plan.setStyleSheet(f"font-size: 11px; color: {DIM};")
+        lay.addWidget(plan)
+        self._labels["plan"] = plan
+
         status = QLabel("初始化…")
         status.setStyleSheet(f"font-size: 11px; color: {DIM};")
         status.setWordWrap(True)
@@ -397,5 +406,5 @@ class OpencodeUsagePlugin(Plugin):
         return SettingsDialog(self, parent)
 
 
-def create_plugin() -> OpencodeUsagePlugin:
-    return OpencodeUsagePlugin()
+def create_plugin() -> CommandCodePlugin:
+    return CommandCodePlugin()

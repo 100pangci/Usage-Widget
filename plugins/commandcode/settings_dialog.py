@@ -1,10 +1,12 @@
-"""opencode 用量插件设置对话框：cookie / 工作区 / 代理 / 采样。
+"""commandcode 用量插件设置对话框：cookie / 代理 / 刷新间隔。
 
-- 工作区：自动检测（getWorkspaces）+ 下拉切换，也可手动输入
-- cookie：粘贴或从文件导入，持久化到插件数据目录（0600）
+- cookie：session_token 与 session_data 分开填写，或粘贴完整 Cookie 由
+  「从剪贴板/从文件读取」自动拆分；持久化到插件数据目录（0600）
 - 代理：自动（系统代理）/ 无 / 自定义
+- 测试连接：验证 cookie 并拉取本月花费与剩余 credits
 """
 import logging
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
@@ -21,10 +23,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .api import OpencodeClient, OpencodeError
-from .format import format_usd
+from .api import DATA_COOKIE, TOKEN_COOKIE, CommandCodeClient, CommandCodeError, parse_cookie_text
+from .format import format_credits, format_usd
+from .proxy import detect_proxy
 
-log = logging.getLogger("opencode.settings")
+log = logging.getLogger("commandcode.settings")
 
 
 class _TaskThread(QThread):
@@ -48,41 +51,35 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.plugin = plugin
         self.setWindowTitle(f"{plugin.name} · 设置")
-        self.setMinimumWidth(460)
+        self.setMinimumWidth(480)
 
         settings = plugin.settings
         self._task = None
 
-        # -- 工作区 --
-        self._ws_combo = QComboBox()
-        self._ws_combo.setEditable(True)
-        self._ws_combo.setMinimumWidth(300)
-        self._ws_combo.setPlaceholderText("自动检测中…")
-        self._ws_detect_btn = QPushButton("检测")
-        self._ws_detect_btn.clicked.connect(self._detect_workspaces)
-        ws_row = QWidget()
-        ws_lay = QHBoxLayout(ws_row)
-        ws_lay.setContentsMargins(0, 0, 0, 0)
-        ws_lay.addWidget(self._ws_combo, 1)
-        ws_lay.addWidget(self._ws_detect_btn)
+        # -- cookie：token / data 分开填 --
+        self._token_edit = QLineEdit()
+        self._token_edit.setPlaceholderText("__Secure-commandcode_prod_.session_token 的值")
+        self._token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._data_edit = QLineEdit()
+        self._data_edit.setPlaceholderText("__Secure-commandcode_prod_.session_data 的值")
+        self._data_edit.setEchoMode(QLineEdit.EchoMode.Password)
 
-        # -- cookie --
-        self._cookie_edit = QLineEdit()
-        self._cookie_edit.setPlaceholderText("粘贴 auth cookie 值（浏览器 F12 → 网络 → Cookie）")
-        self._cookie_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._cookie_from_clip = QPushButton("从剪贴板")
+        self._cookie_from_clip = QPushButton("从剪贴板解析")
         self._cookie_from_clip.clicked.connect(self._cookie_from_clipboard)
         self._cookie_from_file = QPushButton("从文件读取")
         self._cookie_from_file.clicked.connect(self._cookie_from_file_picker)
-        cookie_row = QWidget()
-        cookie_lay = QHBoxLayout(cookie_row)
-        cookie_lay.setContentsMargins(0, 0, 0, 0)
-        cookie_lay.addWidget(self._cookie_edit, 1)
-        cookie_lay.addWidget(self._cookie_from_clip)
-        cookie_lay.addWidget(self._cookie_from_file)
+        paste_row = QWidget()
+        paste_lay = QHBoxLayout(paste_row)
+        paste_lay.setContentsMargins(0, 0, 0, 0)
+        paste_lay.addWidget(self._cookie_from_clip)
+        paste_lay.addWidget(self._cookie_from_file)
 
         self._cookie_path_edit = QLineEdit(str(settings["cookie_path"]))
-        self._cookie_hint = QLabel("cookie 将持久化保存到此文件（权限 600）")
+        self._cookie_hint = QLabel(
+            "分开填：浏览器 F12 → 网络 → 请求头 Cookie 里两个值分别复制；"
+            "也可粘贴完整 Cookie 整串后点「从剪贴板解析」自动拆分。"
+            "cookie 将保存到此文件（权限 600）")
+        self._cookie_hint.setWordWrap(True)
         self._cookie_hint.setStyleSheet("color: #9aa3b5; font-size: 11px;")
 
         # -- 代理 --
@@ -108,9 +105,9 @@ class SettingsDialog(QDialog):
         self._test_label.setWordWrap(True)
 
         form = QFormLayout()
-        form.addRow("工作区", ws_row)
-        form.addRow("", QLabel("自动检测全部工作区，下拉切换；也可直接输入 id"))
-        form.addRow("cookie", cookie_row)
+        form.addRow("session_token", self._token_edit)
+        form.addRow("session_data", self._data_edit)
+        form.addRow("", paste_row)
         form.addRow("保存到", self._cookie_path_edit)
         form.addRow("", self._cookie_hint)
         form.addRow("代理", self._proxy_combo)
@@ -129,59 +126,39 @@ class SettingsDialog(QDialog):
         lay.addWidget(buttons)
         self.setLayout(lay)
 
-        # 预填当前值
-        ws_id = settings["workspace_id"]
-        if ws_id:
-            self._ws_combo.addItem(f"{ws_id}（当前）", ws_id)
-            self._ws_combo.setCurrentIndex(0)
         self._load_cookie_preview()
-        self._detect_workspaces()
-
-    # ---- 工作区自动检测 ----
-
-    def _detect_workspaces(self):
-        self._ws_detect_btn.setEnabled(False)
-        self._ws_detect_btn.setText("检测中…")
-        client = self._make_client()
-        if client is None:
-            self._ws_detect_btn.setEnabled(True)
-            self._ws_detect_btn.setText("检测")
-            return
-        self._start_task(
-            lambda: client.workspaces(),
-            lambda result: self._on_workspaces(result),
-        )
-
-    def _on_workspaces(self, result):
-        self._ws_detect_btn.setEnabled(True)
-        self._ws_detect_btn.setText("检测")
-        status, workspaces = result
-        if status != "ok":
-            self._ws_combo.clear()
-            self._test_label.setText(f"工作区检测失败：{workspaces}")
-            return
-        self._ws_combo.clear()
-        if not workspaces:
-            self._test_label.setText("没有检测到工作区")
-            return
-        for ws in workspaces:
-            label = f"{ws.name} · {ws.id}" if ws.name else ws.id
-            self._ws_combo.addItem(label, ws.id)
-        current = self.plugin.settings["workspace_id"]
-        for i in range(self._ws_combo.count()):
-            if self._ws_combo.itemData(i) == current:
-                self._ws_combo.setCurrentIndex(i)
-                break
-        self._test_label.setText(f"检测到 {len(workspaces)} 个工作区")
 
     # ---- cookie ----
+
+    def _fill_from_text(self, text: str) -> None:
+        """把一段文本拆分填入两个输入框；识别不了就整个放进 token 框。"""
+        parsed = parse_cookie_text(text)
+        if parsed is not None:
+            token, data = parsed
+            if token:
+                self._token_edit.setText(token)
+            if data:
+                self._data_edit.setText(data)
+        else:
+            self._token_edit.setText(text)
+
+    def _combined_cookie(self) -> str:
+        """合并两个输入框为完整 Cookie header（有值的才加）。"""
+        token = self._token_edit.text().strip()
+        data = self._data_edit.text().strip()
+        parts = []
+        if token:
+            parts.append(f"{TOKEN_COOKIE}={token}")
+        if data:
+            parts.append(f"{DATA_COOKIE}={data}")
+        return "; ".join(parts)
 
     def _cookie_from_clipboard(self):
         from PySide6.QtWidgets import QApplication
 
         clip = QApplication.clipboard().text().strip()
         if clip:
-            self._cookie_edit.setText(clip)
+            self._fill_from_text(clip)
 
     def _cookie_from_file_picker(self):
         from PySide6.QtWidgets import QFileDialog
@@ -195,7 +172,7 @@ class SettingsDialog(QDialog):
         except OSError as e:
             self._test_label.setText(f"读取失败: {e}")
             return
-        self._cookie_edit.setText(text)
+        self._fill_from_text(text)
 
     def _load_cookie_preview(self):
         path = self.plugin.settings["cookie_path"]
@@ -204,33 +181,33 @@ class SettingsDialog(QDialog):
         except OSError:
             return
         if text:
-            import re
-
-            m = re.search(r"auth=([^;,\s]+)", text)
-            preview = (m.group(1) if m else text.split(";")[0].split("=", 1)[-1]).strip()
-            self._cookie_edit.setText(preview)
+            self._fill_from_text(text)
 
     # ---- 测试连接 ----
 
     def _test_connection(self):
         self._test_btn.setEnabled(False)
         self._test_label.setText("测试中…")
-        client = self._make_client()
-        if client is None:
+        cookie_text = self._combined_cookie()
+        cookie_path = self._cookie_path_edit.text().strip()
+        if not cookie_text:
+            self._test_label.setText("请先填写 session_token / session_data")
+            self._test_btn.setEnabled(True)
+            return
+        if parse_cookie_text(cookie_text) is None:
+            self._test_label.setStyleSheet("color: #e06c5a;")
+            self._test_label.setText("cookie 格式无法识别")
             self._test_btn.setEnabled(True)
             return
 
         def task():
-            ws = client.workspaces()
-            if not ws:
-                return "连接成功，但没有工作区"
-            import datetime
-
-            today = datetime.date.today()
-            costs = client.month_costs(today.year, today.month - 1)
-            total = sum(c.cost_units for c in costs)
-            return (f"连接成功：{len(ws)} 个工作区，"
-                    f"本月 ${total / 1e8:,.2f}（工作区: {ws[0].name}）")
+            client = self._make_client_from_cookie(cookie_text, cookie_path)
+            session = client.session()
+            summary = client.usage_summary()
+            credits = client.credits()
+            name = (session.get("user") or {}).get("name") or "未知用户"
+            return (f"连接成功：{name} · 本月已用 {format_usd(summary.total_cost)} · "
+                    f"剩余 {format_credits(credits.monthly_remaining)} credits")
 
         self._start_task(task, self._on_test_result)
 
@@ -246,7 +223,7 @@ class SettingsDialog(QDialog):
     # ---- 保存 ----
 
     def _save(self):
-        cookie_text = self._cookie_edit.text().strip()
+        cookie_text = self._combined_cookie()
         cookie_path = self._cookie_path_edit.text().strip()
         if not cookie_path:
             self._test_label.setText("cookie 保存路径不能为空")
@@ -255,12 +232,15 @@ class SettingsDialog(QDialog):
             import os
 
             if cookie_text:
+                if parse_cookie_text(cookie_text) is None:
+                    self._test_label.setText("cookie 格式无法识别")
+                    return
                 with open(cookie_path, "w", encoding="utf-8") as f:
                     f.write(cookie_text + "\n")
                 if os.name != "nt":
                     os.chmod(cookie_path, 0o600)
             elif not os.path.isfile(cookie_path):
-                self._test_label.setText("请先粘贴 cookie 值")
+                self._test_label.setText("请先填写 session_token / session_data")
                 return
         except OSError as e:
             self._test_label.setText(f"保存 cookie 失败: {e}")
@@ -271,28 +251,32 @@ class SettingsDialog(QDialog):
             proxy = "auto"
         elif proxy.startswith("none"):
             proxy = "none"
-        if self._ws_combo.currentData() is not None:
-            workspace_id = str(self._ws_combo.currentData())
-        else:
-            workspace_id = self._ws_combo.currentText().strip()
 
         self.plugin.save_settings({
             "cookie_path": cookie_path,
-            "workspace_id": workspace_id,
             "proxy": proxy,
             "refresh_interval_ms": int(self._refresh_spin.value()) * 1000,
-            "timezone": self.plugin.settings.get("timezone") or self.plugin._system_tz(),
         })
         self.plugin.refresh_now()
         self.accept()
 
     # ---- 工具 ----
 
-    def _make_client(self):
-        client = self.plugin.make_client()
-        if client is None:
-            self._test_label.setText("cookie 未配置：先填写 cookie 并保存")
-        return client
+    def _current_proxy(self) -> str | None:
+        """按代理下拉框当前值返回代理 URL（None = 直连）。"""
+        text = self._proxy_combo.currentText().strip()
+        if text.startswith("auto"):
+            return detect_proxy()
+        if text.startswith("none"):
+            return None
+        return text or None
+
+    def _make_client_from_cookie(self, cookie_text: str, cookie_path: str):
+        """先把 cookie 写入目标文件，再建客户端（保存前测试连接用）。"""
+        path = Path(cookie_path or self.plugin.settings["cookie_path"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(cookie_text + "\n", encoding="utf-8")
+        return CommandCodeClient(cookie_path=path, proxy=self._current_proxy())
 
     def _start_task(self, task, on_done):
         if self._task is not None and self._task.isRunning():
