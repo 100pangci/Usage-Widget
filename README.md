@@ -110,11 +110,14 @@ Windows: `%APPDATA%\usage-widget\config.json`）：
 
 ## 平台说明
 
-- **Linux + KDE Plasma（Wayland）**：首选环境。Qt 6.5+ 的 `WindowStaysOnTopHint`
-  在 KDE Wayland 下不可靠，若需要稳定置顶，请在
-  「系统设置 → 窗口管理 → 窗口规则」添加一条规则：窗口类 `usage-widget`，
-  强制「保持在上」。
-- **X11**：置顶 hint 与位置记忆（`window.position`）均正常生效。
+- **Linux + KDE Plasma**：首选环境。KDE 下置顶由 KWin 脚本接管——
+  启动/右键菜单切换时自动通过 KWin DBus 加载一次性脚本设置窗口
+  `keepAbove` 属性（等价标题栏「保持在上」按钮），Wayland 下 Qt 的
+  `WindowStaysOnTopHint` 被 KWin 忽略时仍能可靠置顶；窗口重建（如
+  `setWindowFlags`）后脚本监听 `windowAdded` 自动补设。非 KDE 会话
+  自动回退到 Qt hint。
+- **Windows / 非 KDE Linux（X11）**：置顶走 Qt `WindowStaysOnTopHint`，
+  X11 下位置记忆（`window.position`）正常生效。
 - Wayland 协议限制下程序无法读写窗口位置，位置记忆仅 X11 有效。
 
 ## 目录结构
