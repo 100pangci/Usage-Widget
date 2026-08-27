@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "usage-widget"
-version = "1.0.2"
+version = "1.0.3"
 description = "可拓展的悬浮窗监控框架"
 requires-python = ">=3.10"
 dependencies = [
@@ -16,4 +16,4 @@ dependencies = [
 usage-widget = "main:main"
 
 [tool.setuptools]
-packages = ["core", "ui", "plugins", "plugins.clock", "plugins.opencode_usage"]
+packages = ["core", "ui", "plugins", "plugins.clock", "plugins.opencode_usage", "plugins.commandcode"]

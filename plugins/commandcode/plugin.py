@@ -51,6 +51,22 @@ GREEN = "#7cc76b"
 AMBER = "#e5b94d"
 RED = "#e06c5a"
 
+# 仍在跑的取数线程驻留表：插件停止/重载时不在 UI 线程 wait()（那会
+# 卡死界面），而是把引用移交到这里直到线程自然结束，避免「QThread
+# 销毁时线程还在运行」；线程结束后统一释放。
+_RUNNING_WORKERS: set = set()
+
+
+def _release_worker(worker) -> None:
+    """取数线程结束后的统一清理：排定删除并等销毁后再撤驻留引用。
+
+    引用必须在 destroyed 之后才能撤销，否则 wrapper 可能先于事件
+    循环删除线程对象而被 GC，绕开安全的 deleteLater 路径。
+    """
+    worker.destroyed.connect(
+        lambda *_: _RUNNING_WORKERS.discard(worker))
+    worker.deleteLater()
+
 
 def percent_color(percent: int) -> str:
     """使用率颜色：<50% 绿 / <80% 黄 / ≥80% 红。"""
@@ -89,13 +105,17 @@ class UsageBar(QWidget):
 
 
 class FetchWorker(QThread):
-    """后台拉取汇总 + credits + 订阅，完成后发 ok/fail 信号。"""
+    """后台拉取汇总 + credits + 订阅，完成后发 ok/fail 信号。
+
+    不设父对象：stop 时可能要脱离插件实例独立跑完当前网络请求，
+    存活期由模块级 _RUNNING_WORKERS 驻留表保证。
+    """
 
     ok = Signal(object)
     fail = Signal(str)
 
-    def __init__(self, client, parent=None):
-        super().__init__(parent)
+    def __init__(self, client):
+        super().__init__()
         self._client = client
 
     def run(self):
@@ -215,9 +235,18 @@ class CommandCodePlugin(Plugin):
 
     def on_stop(self) -> None:
         self._ticker.stop()
-        if self._worker is not None:
-            self._worker.requestInterruption()
-            self._worker.wait(8000)
+        worker = self._worker
+        if worker is not None:
+            # 先摘引用：随后的 finished 不会误伤重建后的新实例；
+            # 标记中断即可返回。绝不能在 UI 线程 wait()——一次网络
+            # 请求最长 15s、多个接口顺序执行可达 30s+，用户会当成
+            # 「重新加载卡死」。线程存活期由 _RUNNING_WORKERS 保证。
+            self._worker = None
+            worker.requestInterruption()
+        # 清掉标签引用：迟到的取数结果不再触碰已销毁的控件
+        self._labels = {}
+        self._limits = {}
+        self._period_end_ms = None
 
     def tick(self) -> None:
         if self._worker is not None:
@@ -230,20 +259,23 @@ class CommandCodePlugin(Plugin):
             self._set_status("未配置 cookie：右键 → 插件设置 粘贴后启用")
             return
         self._set_status("获取中…")
-        self._worker = FetchWorker(client, self)
-        self._worker.ok.connect(self._apply_stats)
-        self._worker.fail.connect(self._apply_error)
-        self._worker.finished.connect(self._on_worker_finished)
-        self._worker.start()
+        worker = FetchWorker(client)
+        worker.ok.connect(self._apply_stats)
+        worker.fail.connect(self._apply_error)
+        worker.finished.connect(self._on_worker_finished)
+        # finished 无参信号不会给普通函数传参，需用默认参数绑定 worker
+        worker.finished.connect(
+            lambda w=worker: _release_worker(w))
+        _RUNNING_WORKERS.add(worker)
+        self._worker = worker
+        worker.start()
 
     def refresh_now(self) -> None:
         self.tick()
 
     def _on_worker_finished(self) -> None:
-        worker = self._worker
-        self._worker = None
-        if worker is not None:
-            worker.deleteLater()
+        if self._worker is not None and self._worker.isFinished():
+            self._worker = None
 
     # ---- 数据落地 ----
 

@@ -6,6 +6,7 @@ create_plugin() 工厂函数返回插件实例。单个插件失败不影响其�
 import importlib
 import logging
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -153,9 +154,19 @@ class PluginManager:
             plugin.start()
             log.debug("插件已启动: %s", pid)
 
-    def stop_all(self) -> None:
+    def stop_all(self, grace_ms: int = 0) -> None:
+        """停止全部插件。
+
+        默认零阻塞（用于「重新加载插件」等 UI 路径，绝不卡界面）。
+        grace_ms>0 时（应用退出）给全部在跑的后台线程共享这么多
+        毫秒的收尾预算，超时部分不再等待。
+        """
+        deadline = (time.monotonic() + grace_ms / 1000) if grace_ms else 0.0
         for pid, plugin in self.plugins.items():
-            plugin.stop()
+            remaining = 0
+            if grace_ms:
+                remaining = max(0, int((deadline - time.monotonic()) * 1000))
+            plugin.stop(remaining)
 
     def reload(self) -> list[str]:
         """重新扫描并加载插件（先停旧实例）。"""

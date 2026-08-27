@@ -392,7 +392,9 @@ class FloatingWindow(QWidget):
             self.config.set("window", "position", value=[self.x(), self.y()])
             self.config.save()
         self._kwin_unload_script()
-        self.manager.stop_all()
+        # 退出时给在跑的后台取数线程共享 2.5s 收尾预算；
+        # 平时 reload 路径的 stop_all 保持零阻塞
+        self.manager.stop_all(grace_ms=2500)
         super().closeEvent(event)
         QApplication.instance().quit()
 

@@ -30,4 +30,10 @@ def create_app(config: Config) -> FloatingWindow:
     window = FloatingWindow(config, manager)
     window.populate_sections()
     manager.start_all()
+
+    # 兜底退出清理：不经窗口 closeEvent 的退出路径（如 Ctrl+C）也
+    # 要停掉后台取数线程，避免带着活线程卡死在进程清理阶段
+    def _stop_on_quit() -> None:
+        manager.stop_all(grace_ms=2500)
+    app.aboutToQuit.connect(_stop_on_quit)
     return window

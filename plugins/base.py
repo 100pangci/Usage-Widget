@@ -67,10 +67,27 @@ class Plugin(QObject):
         except Exception:
             log.exception("插件 %s 启动失败", self.id)
 
-    def stop(self) -> None:
+    def stop(self, grace_ms: int = 0) -> None:
+        """停止插件。
+
+        默认完全不阻塞调用线程：后台线程只标记中断，存活期由插件
+        模块内的驻留表保证（用于「重新加载插件」等 UI 路径）。
+        应用退出时可传 grace_ms>0，给在跑的后台线程总计至多这么多
+        毫秒的收尾时间，避免带着活线程退出触发 Qt 的致命断言。
+        """
         try:
             self._timer.stop()
+            worker = getattr(self, "_worker", None)
             self.on_stop()
+            if grace_ms > 0 and worker is not None:
+                worker.wait(min(int(grace_ms), 3000))
+                if worker.isRunning():
+                    # 收尾预算耗尽仍在跑（网络卡死等）：退出前强杀，
+                    # 否则带着活线程退出可能让整个进程卡死在清理阶段
+                    log.warning(
+                        "插件 %s 的后台线程未在 %dms 内结束，强制终止",
+                        self.id, grace_ms)
+                    worker.terminate()
         except Exception:
             log.exception("插件 %s 停止出错", self.id)
 

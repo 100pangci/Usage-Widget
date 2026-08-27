@@ -46,6 +46,22 @@ GREEN = "#7cc76b"
 AMBER = "#e5b94d"
 RED = "#e06c5a"
 
+# 仍在跑的取数线程驻留表：插件停止/重载时不在 UI 线程 wait()（那会
+# 卡死界面），而是把引用移交到这里直到线程自然结束，避免「QThread
+# 销毁时线程还在运行」；线程结束后统一释放。
+_RUNNING_WORKERS: set = set()
+
+
+def _release_worker(worker) -> None:
+    """取数线程结束后的统一清理：排定删除并等销毁后再撤驻留引用。
+
+    引用必须在 destroyed 之后才能撤销，否则 wrapper 可能先于事件
+    循环删除线程对象而被 GC，绕开安全的 deleteLater 路径。
+    """
+    worker.destroyed.connect(
+        lambda *_: _RUNNING_WORKERS.discard(worker))
+    worker.deleteLater()
+
 
 def percent_color(percent: int) -> str:
     """使用率颜色：<50% 绿 / <80% 黄 / ≥80% 红。"""
@@ -84,15 +100,20 @@ class UsageBar(QWidget):
 
 
 class FetchWorker(QThread):
-    """后台拉取 + 统计，完成后发 ok/fail 信号。"""
+    """后台拉取 + 统计，完成后发 ok/fail 信号。
+
+    不设父对象：stop 时可能要脱离插件实例独立跑完当前网络请求，
+    存活期由模块级 _RUNNING_WORKERS 驻留表保证。
+    """
 
     ok = Signal(object)
     fail = Signal(str)
 
-    def __init__(self, client, tz, parent=None):
-        super().__init__(parent)
+    def __init__(self, client, tz, detect_workspace=False):
+        super().__init__()
         self._client = client
         self._tz = tz
+        self._detect_workspace = detect_workspace
 
     def run(self):
         try:
@@ -110,6 +131,17 @@ class FetchWorker(QThread):
     def _fetch(self) -> dict | None:
         client = self._client
 
+        # 工作区自动检测也放后台线程（主线程做网络请求会卡死 UI）
+        resolved_ws = None
+        if self._detect_workspace:
+            workspaces = client.workspaces()
+            if self.isInterruptionRequested():
+                return None
+            if not workspaces:
+                raise OpencodeError("没有可用的工作区")
+            resolved_ws = workspaces[0].id
+            client.workspace_id = resolved_ws
+
         usage = client.subscription_usage()
         if self.isInterruptionRequested():
             return None
@@ -124,6 +156,7 @@ class FetchWorker(QThread):
             "weekly": usage.weekly,
             "monthly": usage.monthly,
             "month_units": sum(c.cost_units for c in costs),
+            "resolved_workspace": resolved_ws,
             "fetched_at": datetime.now().strftime("%H:%M"),
         }
 
@@ -219,7 +252,11 @@ class OpencodeUsagePlugin(Plugin):
         return self._client
 
     def resolve_workspace(self) -> str | None:
-        """设置里没填工作区时自动取第一个。"""
+        """设置里没填工作区时自动取第一个（仅同步场景/兼容旧调用）。
+
+        注意：不要在 UI 线程的刷新路径调用——里面有网络请求。
+        正常 tick 的自动检测在 FetchWorker 后台线程内完成。
+        """
         if self.settings["workspace_id"]:
             return self.settings["workspace_id"]
         client = self.make_client()
@@ -243,9 +280,17 @@ class OpencodeUsagePlugin(Plugin):
 
     def on_stop(self) -> None:
         self._ticker.stop()
-        if self._worker is not None:
-            self._worker.requestInterruption()
-            self._worker.wait(8000)
+        worker = self._worker
+        if worker is not None:
+            # 先摘引用：随后的 finished 不会误伤重建后的新实例；
+            # 标记中断即可返回。绝不能在 UI 线程 wait()——一次网络
+            # 请求最长 15s、多个接口顺序执行可达 30s+，用户会当成
+            # 「重新加载卡死」。线程存活期由 _RUNNING_WORKERS 保证。
+            self._worker = None
+            worker.requestInterruption()
+        # 清掉标签引用：迟到的取数结果不再触碰已销毁的控件
+        self._labels = {}
+        self._reset_left = {}
 
     def tick(self) -> None:
         if self._worker is not None:
@@ -253,38 +298,47 @@ class OpencodeUsagePlugin(Plugin):
         if not self.cookie_configured():
             self._set_status("未配置 cookie：右键 → 插件设置 填写后启用")
             return
-        if self.settings["workspace_id"]:
-            self._start_fetch()
-        elif self.resolve_workspace():
-            self._start_fetch()
-        else:
-            self._set_status("工作区检测失败：右键 → 插件设置 手动填写")
+        detect_ws = not bool(self.settings["workspace_id"])
+        if detect_ws:
+            self._set_status("自动检测工作区…")
+        self._start_fetch(detect_workspace=detect_ws)
 
     def refresh_now(self) -> None:
         self.tick()
 
-    def _start_fetch(self) -> None:
+    def _start_fetch(self, detect_workspace: bool = False) -> None:
         client = self.make_client()
         if client is None:
             self._set_status("未配置 cookie：右键 → 插件设置 填写后启用")
             return
         self._set_status("获取中…")
-        self._worker = FetchWorker(
-            client, self.settings["timezone"], self)
-        self._worker.ok.connect(self._apply_stats)
-        self._worker.fail.connect(self._apply_error)
-        self._worker.finished.connect(self._on_worker_finished)
-        self._worker.start()
+        worker = FetchWorker(client, self.settings["timezone"], detect_workspace)
+        worker.ok.connect(self._apply_stats)
+        worker.fail.connect(self._apply_error)
+        worker.finished.connect(self._on_worker_finished)
+        # finished 无参信号不会给普通函数传参，需用默认参数绑定 worker
+        worker.finished.connect(
+            lambda w=worker: _release_worker(w))
+        _RUNNING_WORKERS.add(worker)
+        self._worker = worker
+        worker.start()
 
     def _on_worker_finished(self) -> None:
-        worker = self._worker
-        self._worker = None
-        if worker is not None:
-            worker.deleteLater()
+        if self._worker is not None and self._worker.isFinished():
+            self._worker = None
 
     def _apply_stats(self, stats: dict) -> None:
         if not self._labels:
             return
+        # 后台线程自动检测到的工作区：在主线程落地持久化
+        resolved = stats.get("resolved_workspace")
+        if resolved and self.settings.get("workspace_id") != resolved:
+            self.settings["workspace_id"] = resolved
+            try:
+                self.save_settings(self.settings)
+                log.info("已自动保存工作区: %s", resolved)
+            except OSError as e:
+                log.warning("保存工作区失败: %s", e)
         self._reset_left = {
             "rolling": stats["rolling"].reset_in_sec,
             "weekly": stats["weekly"].reset_in_sec,
