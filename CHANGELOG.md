@@ -1,5 +1,31 @@
 # Changelog
 
+## [v1.0.1] - 2026-08-27
+
+### 新增
+
+- commandcode 用量插件：5小时/每周/每月用量进度条（百分比 + 绿/黄/红颜色分级）、
+  重置倒计时（本地每秒递减）、本月花费与请求次数/tokens、订阅计划与计费周期
+- commandcode 设置对话框：session_token / session_data 分开填写，
+  支持从剪贴板解析、从文件导入，保存后合并为完整 Cookie（权限 600）
+- KDE Plasma 置顶支持：置顶改由 KWin 脚本控制（`keepAbove` 属性 + `windowAdded`
+  监听，窗口映射/重建后自动补设），解决 Wayland 下 Qt 置顶 hint 被忽略的问题；
+  自动探测 `qdbus`/`qdbus6`/`qdbus-qt6`，非 KDE 环境回退 Qt hint，Windows 逻辑不变
+
+### 修复
+
+- 折叠/隐藏插件分区后窗口和半透明背景不收缩的问题（窗口布局改用
+  `SetNoConstraint` 手动控制尺寸；`setVisible` 的 LayoutRequest 是异步的，
+  延迟一帧再按新内容收缩窗口）
+- 隐藏分区后「插件设置」菜单仍显示该插件的问题（按可见性过滤，显隐时重建菜单）
+- `TextRow` 组件在缺少父窗口时崩溃的问题
+- 设置对话框测试连接按钮卡死的问题（cookie 未配置时按钮状态未恢复）
+- Windows 上保存 cookie 时 `os.chmod` 报错的问题
+- QSS 模板字符串转义错误导致样式解析失败的问题
+- 配置防御：config.json 编码损坏（`UnicodeDecodeError`）不再导致启动崩溃；
+  刷新间隔配置非法值时回退默认值
+- opencode 用量解析：RSC 解析器对畸形数字会明确报错而非崩溃
+
 ## [v1.0.0] - 2026-08-13
 
 ### 修复
