@@ -119,15 +119,28 @@ class FloatingWindow(PluginWindow):
                 lambda _=False, p=plugin: self._open_plugin_settings_dlg(p))
             self._settings_menu.addAction(action)
         self._settings_menu.setEnabled(not self._settings_menu.isEmpty())
-        # 窗口菜单（分离/合并）
+        # 窗口菜单（分离）
         self._detach_menu.clear()
+        has_child = any(wid != MAIN_ID for wid in self.window_manager.windows)
+        # 插件在哪个窗口？
         for pid, plugin in self.manager.plugins.items():
             title = plugin.name or pid
-            action = QAction(f"分离「{title}」", self._detach_menu)
-            action.triggered.connect(
-                lambda _=False, p=plugin: self._detach_plugin(p))
+            if pid in self.plugin_ids:
+                # 在主窗口：显示「分离」
+                action = QAction(f"分离「{title}」", self._detach_menu)
+                action.triggered.connect(
+                    lambda _=False, p=plugin: self._detach_plugin(p))
+            else:
+                # 在子窗口：不提供分离（子窗口自己的菜单有「合并到」）
+                loc = next((wid for wid, w in self.window_manager.windows.items()
+                            if wid != MAIN_ID and pid in w.plugin_ids), None)
+                label = f"{title}（在 {loc}）" if loc else f"{title}（未加载）"
+                action = QAction(label, self._detach_menu)
+                action.setEnabled(False)
             self._detach_menu.addAction(action)
-        self._detach_menu.setEnabled(not self._detach_menu.isEmpty())
+        # 只有一个窗口（主窗口，无子窗口）且无插件可分离时隐藏
+        has_main_plugins = any(pid in self.plugin_ids for pid, _ in self.manager.plugins.items())
+        self._detach_menu.setEnabled(has_child or has_main_plugins)
 
     def _toggle_section(self, pid: str, visible: bool) -> None:
         for section in self._container._sections:
