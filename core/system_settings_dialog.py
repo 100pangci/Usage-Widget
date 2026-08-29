@@ -91,7 +91,7 @@ class SystemSettingsDialog(QDialog):
         list_lay.addLayout(btn_col)
 
         # 填充窗口下拉框
-        self._windows = self.window._all_windows()
+        self._windows = self.window.window_manager.windows
         self._window_ids = list(self._windows)
         for wid in self._window_ids:
             name = "主窗口" if wid == "main" else wid
@@ -174,11 +174,8 @@ class SystemSettingsDialog(QDialog):
 
         # 应用主题 + 透明度
         self.window.apply_theme(new_theme, new_alpha)
-        # 重建对应窗口的分区（顺序生效）
+        # 重建对应窗口的分区（顺序生效；实例不变，只重建 UI 顺序）
         target = self._windows.get(wid)
         if target is not None:
-            if wid == "main":
-                self.window.populate_sections()
-            else:
-                target.rebuild()
+            target.rebuild()
         self.accept()

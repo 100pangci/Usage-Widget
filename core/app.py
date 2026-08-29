@@ -29,7 +29,6 @@ def create_app(config: Config) -> FloatingWindow:
     manager.load_all()
 
     window = FloatingWindow(config, manager)
-    window.populate_sections()
     manager.start_all()
 
     # 兜底退出清理：不经窗口 closeEvent 的退出路径（如 Ctrl+C）也

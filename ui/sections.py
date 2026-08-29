@@ -30,8 +30,14 @@ class Section(QFrame):
         self._toggle.clicked.connect(self.toggle_collapse)
 
         self._title = QLabel(title)
+        try:
+            from core.theme import color
+
+            _dim = color("dim")
+        except ImportError:
+            _dim = "#9aa3b5"
         self._title.setStyleSheet(
-            "font-size: 11px; font-weight: 600; letter-spacing: 1px; color: #9aa3b5;"
+            f"font-size: 11px; font-weight: 600; letter-spacing: 1px; color: {_dim};"
         )
 
         head = QWidget()

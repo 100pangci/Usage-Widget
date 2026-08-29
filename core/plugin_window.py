@@ -1,8 +1,9 @@
-"""插件窗口：多插件悬浮窗（主窗口或独立窗口共用）。
+"""插件窗口：统一的多插件悬浮窗（主窗口与独立窗口同构）。
 
-- 每个窗口持有 0..N 个插件实例，按顺序渲染分区
-- 右键菜单「合并到」列出其他窗口，把本窗口全部插件迁过去
-- 置顶、关闭、插件设置
+- 插件实例由 WindowManager 分配，本窗口只负责 UI 挂载/卸载
+- add_plugin = create_widget + start（幂等）；remove_plugin = stop
+- 右键菜单：「合并到 → 其他窗口」「置顶」「插件设置…」「关闭」
+- 关闭窗口时通知管理器（插件回主窗口、配置清理）
 """
 import logging
 
@@ -11,26 +12,25 @@ from PySide6.QtGui import QAction, QColor, QGuiApplication
 from PySide6.QtWidgets import QLayout, QMenu, QVBoxLayout, QWidget
 
 import core.theme as theme
-from core.window import _kwin_unload_script, is_kde_session, kwin_set_always_on_top
+from core.kwin import is_kde_session, set_keepabove, unload_keepabove_script
 from ui.sections import SectionsContainer
 
 log = logging.getLogger("usage-widget.plugin_window")
 
-# 独立窗口的 KWin 置顶脚本名（与主窗口区分，避免互相覆盖）
-_KWIN_SCRIPT_NAME = "usage-widget-plugin-keepabove"
-
 PANEL_STYLE = """
-#panel QLabel { color: #dfe3ea; }
-#panel QToolButton { color: #dfe3ea; border: none; background: transparent; padding: 2px 6px; border-radius: 4px; }
-#panel QToolButton:hover { background: rgba(255, 255, 255, 18); }
+#panel QLabel { color: %(text)s; }
+#panel QToolButton { color: %(text)s; border: none; background: transparent; padding: 2px 6px; border-radius: 4px; }
+#panel QToolButton:hover { background: %(hover)s; }
 """
 
 
 class PluginWindow(QWidget):
     """多插件悬浮窗（主窗口或独立窗口）。"""
 
-    # (plugin_id, target_window_id)：把插件合并到目标窗口
+    # (source_id, target_id)：合并窗口请求
     merge_requested = Signal(str, str)
+    # (window_id)：窗口被用户关闭
+    closed = Signal(str)
 
     def __init__(self, window_id: str, config, title: str, parent=None):
         super().__init__(parent)
@@ -38,8 +38,9 @@ class PluginWindow(QWidget):
         self.config = config
         self._plugins: dict[str, object] = {}
         self._drag_pos: QPoint | None = None
-        self._targets: list[tuple[str, str]] = []  # (window_id, title) 合并目标
-        self._on_merge = None  # 由管理器注入的回调(plugin_id, target_id)
+        self._targets: list[tuple[str, str]] = []
+        self._manager = None  # WindowManager
+        self._user_closing = False
 
         self.setWindowTitle(f"{title} - usage-widget")
         self.setWindowFlags(
@@ -53,20 +54,25 @@ class PluginWindow(QWidget):
         self._container.setObjectName("panel")
         self._container.layout_changed.connect(
             lambda: QTimer.singleShot(0, self._fit_to_content))
-        self._container.setStyleSheet(PANEL_STYLE)
+        self._container.setStyleSheet(self._panel_style())
 
         fill = QVBoxLayout(self)
         fill.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         fill.setContentsMargins(0, 0, 0, 0)
         fill.addWidget(self._container)
 
-        saved_theme = self.config.get("window", "theme", default=theme.DARK)
-        saved_alpha = self.config.get("window", "opacity", default=0.92)
-        self.apply_theme(saved_theme, saved_alpha)
-
+        self.apply_theme(
+            self.config.get("window", "theme", default=theme.DARK),
+            self.config.get("window", "opacity", default=0.92),
+        )
         self._build_menu()
 
-    # ---- 插件管理 ----
+    # ---- 管理器 ----
+
+    def bind_manager(self, manager) -> None:
+        self._manager = manager
+
+    # ---- 插件挂载 ----
 
     @property
     def plugin_ids(self) -> list[str]:
@@ -76,7 +82,7 @@ class PluginWindow(QWidget):
         return self._plugins.get(pid)
 
     def add_plugin(self, plugin) -> None:
-        """添加插件分区（追加到末尾）；实例未启动则启动。"""
+        """挂载插件：create_widget + start（幂等）。"""
         pid = plugin.id
         if pid in self._plugins:
             return
@@ -88,7 +94,7 @@ class PluginWindow(QWidget):
         self._plugins[pid] = plugin
         title = plugin.name or pid
         self._container.add_section(pid, title, widget)
-        # 迁移复用实例：确保 timer 在跑（start 幂等）
+        # 迁移复用实例：确保 timer 在跑
         try:
             if not plugin._timer.isActive():
                 plugin.start()
@@ -96,11 +102,11 @@ class PluginWindow(QWidget):
             plugin.start()
         QTimer.singleShot(0, self._fit_to_content)
 
-    def remove_plugin(self, pid: str) -> None:
-        """移除插件分区（不停止实例，供迁移到其他窗口复用）。"""
+    def remove_plugin(self, pid: str):
+        """卸载插件：stop + 清引用，返回实例供迁移。"""
         plugin = self._plugins.pop(pid, None)
         if plugin is None:
-            return
+            return None
         for section in list(self._container._sections):
             if section.key == pid:
                 self._container._lay.removeWidget(section)
@@ -109,16 +115,17 @@ class PluginWindow(QWidget):
                 section.deleteLater()
                 self._container._sections.remove(section)
                 break
+        try:
+            plugin.stop(grace_ms=300)
+        except Exception:
+            log.exception("停止插件 %s 失败", pid)
         QTimer.singleShot(0, self._fit_to_content)
-
-    def set_merge_targets(self, targets: list[tuple[str, str]]) -> None:
-        """设置「合并到」菜单的目标窗口列表。"""
-        self._targets = targets
-        self._rebuild_merge_menu()
+        return plugin
 
     def rebuild(self) -> None:
-        """按当前 _plugins 顺序重建分区（顺序变更后调用）。"""
+        """按当前 _plugins 顺序重建分区（实例不变，仅重建 UI 顺序）。"""
         plugins = list(self._plugins.values())
+        # 先卸载 UI（不 stop 实例，稍后重新挂载）
         for pid in list(self._plugins):
             for section in list(self._container._sections):
                 if section.key == pid:
@@ -128,14 +135,10 @@ class PluginWindow(QWidget):
                     section.deleteLater()
                     self._container._sections.remove(section)
                     break
-        self._plugins = {}
+            self._plugins.pop(pid, None)
         for p in plugins:
             self.add_plugin(p)
         QTimer.singleShot(0, self._fit_to_content)
-
-    def set_merge_callback(self, callback) -> None:
-        """注入合并回调(plugin_id, target_window_id)。"""
-        self._on_merge = callback
 
     # ---- 主题 ----
 
@@ -148,14 +151,22 @@ class PluginWindow(QWidget):
             bg = QColor(242, 244, 248, int(alpha * 255))
             border = QColor(0, 0, 0, 40)
         self._container.set_panel_colors(bg, border)
+        self._container.setStyleSheet(self._panel_style())
+
+    def _panel_style(self) -> str:
+        if theme.is_dark():
+            return PANEL_STYLE % {"text": "#dfe3ea", "hover": "rgba(255,255,255,18)"}
+        return PANEL_STYLE % {"text": "#23272f", "hover": "rgba(0,0,0,12)"}
 
     # ---- 尺寸 ----
 
     def _fit_to_content(self) -> None:
         self._container.layout().activate()
         hint = self._container.sizeHint()
+        wcfg = self.config.get("window", default={}) or {}
+        base_w = int(wcfg.get("width", 300))
         self.setMinimumSize(0, 0)
-        self.resize(max(220, hint.width()), max(60, hint.height()))
+        self.resize(max(base_w, hint.width()), max(60, hint.height()))
 
     # ---- 拖动 ----
 
@@ -197,18 +208,30 @@ class PluginWindow(QWidget):
         topmost_action.toggled.connect(self._toggle_topmost)
         self._menu.addAction(topmost_action)
 
+        settings_action = QAction("插件设置…", self)
+        settings_action.triggered.connect(self._open_plugin_settings)
+        self._menu.addAction(settings_action)
+
         close_action = QAction("关闭", self)
-        close_action.triggered.connect(self.close)
+        close_action.triggered.connect(self._user_close)
         self._menu.addAction(close_action)
+
+    def _user_close(self) -> None:
+        self._user_closing = True
+        self.close()
 
     def _rebuild_merge_menu(self) -> None:
         self._merge_menu.clear()
-        for wid, title in self._targets:
-            action = QAction(title, self._merge_menu)
+        for wid, name in self._targets:
+            action = QAction(name, self._merge_menu)
             action.triggered.connect(
                 lambda _=False, t=wid: self._request_merge(t))
             self._merge_menu.addAction(action)
         self._merge_menu.setEnabled(not self._merge_menu.isEmpty())
+
+    def set_merge_targets(self, targets: list[tuple[str, str]]) -> None:
+        self._targets = targets
+        self._rebuild_merge_menu()
 
     def contextMenuEvent(self, event):
         self._menu.exec(event.globalPos())
@@ -225,16 +248,38 @@ class PluginWindow(QWidget):
         if "wayland" not in QGuiApplication.platformName():
             self.move(pos)
         if is_kde_session():
-            kwin_set_always_on_top(checked, _KWIN_SCRIPT_NAME)
+            set_keepabove(checked, f"usage-widget-{self.window_id}-keepabove")
+        if self._manager is not None:
+            self._manager.persist()
+
+    def _open_plugin_settings(self) -> None:
+        # 对每个插件依次打开设置（简化为第一个）
+        if self._plugins:
+            first = next(iter(self._plugins.values()))
+            dialog = first.settings_dialog(self)
+            if dialog is not None:
+                dialog.exec()
+
+    # ---- 合并 ----
+
+    def _request_merge(self, target_id: str) -> None:
+        if self._manager is not None:
+            self._manager.merge_window(self.window_id, target_id)
 
     def closeEvent(self, event):
         if is_kde_session():
-            _kwin_unload_script(_KWIN_SCRIPT_NAME)
+            unload_keepabove_script(f"usage-widget-{self.window_id}-keepabove")
+        # 只有用户主动关闭（菜单「关闭」/点 X）才通知管理器回收插件；
+        # 程序内部 deleteLater 触发的 close 不应触发（防止重启恢复时
+        # 窗口被误判为「用户关闭」而把插件挪回主窗口）。
+        if (self._manager is not None and self.window_id != "main"
+                and (self._user_closing or event.spontaneous())):
+            self.closed.emit(self.window_id)
         for pid in list(self._plugins):
             try:
                 self._plugins[pid].stop(grace_ms=1000)
             except Exception:
-                log.exception("停止插件 %s 失败", pid)
+                pass
         super().closeEvent(event)
         from PySide6.QtWidgets import QApplication
 
@@ -244,10 +289,3 @@ class PluginWindow(QWidget):
                      if w.isVisible() and isinstance(w, (QWidget,))]
             if not alive:
                 app.quit()
-
-    # ---- 合并 ----
-
-    def _request_merge(self, target_id: str) -> None:
-        """把本窗口全部插件合并到目标窗口。"""
-        if self._on_merge is not None:
-            self._on_merge(self.window_id, target_id)
