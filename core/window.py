@@ -169,17 +169,31 @@ class FloatingWindow(QWidget):
 
     # ---- 插件分区 ----
 
+    @property
+    def plugin_ids(self) -> list[str]:
+        """主窗口当前显示的插件 id 列表（按容器顺序）。"""
+        return [s.key for s in self._container._sections]
+
     def populate_sections(self) -> None:
         """为每个已加载插件创建分区。"""
         self._container.clear()
         self._section_titles: list[tuple[str, str]] = []
         hidden = set(self.config.get("window", "hidden_sections", default=[]) or [])
-        detached = set(self.config.get("window", "detached", default={}) or {})
-        for pid, plugin in self.manager.plugins.items():
+        # 窗口配置：恢复各窗口的插件分配（含顺序）
+        windows_cfg = self.config.get("windows", default={}) or {}
+        main_plugins = windows_cfg.get("main", {}).get("plugins") or []
+        # 主窗口按配置顺序加载；未配置的插件进主窗口末尾
+        ordered = list(main_plugins) + [pid for pid in self.manager.plugins
+                                        if pid not in main_plugins]
+        for pid in ordered:
+            plugin = self.manager.plugins.get(pid)
+            if plugin is None:
+                continue
             title = plugin.name or pid
             self._section_titles.append((pid, title))
-            # 已拆分的插件不进主窗口容器，由独立窗口显示
-            if pid in detached:
+            # 该插件在其他独立窗口里（按 windows 配置）：恢复分离
+            if any(pid in (wc.get("plugins") or [])
+                   for wid, wc in windows_cfg.items() if wid != "main"):
                 self._detach_plugin(plugin, restore=True)
                 continue
             try:
@@ -307,15 +321,19 @@ class FloatingWindow(QWidget):
             self._settings_menu.addAction(action)
         self._settings_menu.setEnabled(not self._settings_menu.isEmpty())
 
-        # 分离到独立窗口子菜单（已拆分的显示「合并回主窗口」）
+        # 窗口子菜单：列出所有窗口（分离/合并 + 窗口设置）
         self._detach_menu.clear()
-        detached = set(self.config.get("window", "detached", default={}) or {})
+        windows = self._all_windows()
         for pid, plugin in self.manager.plugins.items():
             title = plugin.name or pid
-            if pid in self._plugin_windows or pid in detached:
+            # 该插件在哪个窗口？
+            in_main = pid in self._container._sections
+            in_win = [wid for wid, win in self._plugin_windows.items()
+                      if pid in win.plugin_ids]
+            if in_win:
                 action = QAction(f"合并「{title}」", self._detach_menu)
                 action.triggered.connect(
-                    lambda _=False, p=pid: self._merge_plugin(p))
+                    lambda _=False, p=pid, w=in_win[0]: self._merge_from_window(p, w))
             else:
                 action = QAction(f"分离「{title}」", self._detach_menu)
                 action.triggered.connect(
@@ -356,50 +374,76 @@ class FloatingWindow(QWidget):
             self._rebuild_menu()
         QTimer.singleShot(0, lambda: self._fit_to_content(shrink=True))
 
-    # ---- 插件分离/合并 ----
+    # ---- 插件分离/合并（统一多窗口模型） ----
+
+    def _make_detached_instance(self, pid: str):
+        """创建独立插件实例（自己的 data_dir，与主窗口实例解耦）。"""
+        from core.plugin_manager import import_plugin, instantiate_plugin
+
+        try:
+            module = import_plugin(self.manager.plugins_dir, pid)
+            data_root = Path.home() / ".usage-widget" / "plugin"
+            data_dir = data_root / pid
+            data_dir.mkdir(parents=True, exist_ok=True)
+            context = {"config": self.config, "data_dir": data_dir}
+            plugin = instantiate_plugin(module, pid, context)
+            plugin.start()
+            return plugin
+        except Exception:
+            log.exception("创建独立插件实例 %s 失败", pid)
+            return None
+
+    def _new_window_id(self) -> str:
+        n = len(self._plugin_windows) + 1
+        while f"w{n}" in self._plugin_windows:
+            n += 1
+        return f"w{n}"
 
     def _detach_plugin(self, plugin, restore: bool = False) -> None:
-        """把插件分区拆到独立窗口（使用独立插件实例，与主窗口生命周期解耦）。
+        """把插件分区拆到独立窗口。
 
-        分离的窗口是自治的：主窗口关闭不影响它；「合并回主窗口」只在该
-        窗口的右键菜单里。配置 window.detached[pid] 持久化分离状态。
+        新独立窗口窗口 id 形如 w1/w2...，可继续往里面加插件。
         """
-        from core.plugin_manager import import_plugin, instantiate_plugin
         from core.plugin_window import PluginWindow
 
         pid = plugin.id
-        if pid in self._plugin_windows:
-            return
+        # 若该插件已在某个独立窗口里（启动恢复时），不再重复分离
+        for wid, win in self._plugin_windows.items():
+            if pid in win.plugin_ids:
+                return
+        wid = self._new_window_id()
+        # 独立实例（恢复时用主窗口实例，避免重复创建）
         if restore:
-            # 启动恢复：复用主窗口实例（已在 manager.plugins 里）
-            detached_plugin = plugin
+            inst = self.manager.plugins.get(pid)
         else:
-            # 运行时分离：创建独立插件实例（自己的 data_dir，与主窗口
-            # 实例互不干扰；主窗口关闭不影响分离窗口）
-            try:
-                module = import_plugin(self.manager.plugins_dir, pid)
-                data_root = Path.home() / ".usage-widget" / "plugin"
-                data_dir = data_root / pid
-                data_dir.mkdir(parents=True, exist_ok=True)
-                context = {"config": self.config, "data_dir": data_dir}
-                detached_plugin = instantiate_plugin(module, pid, context)
-                detached_plugin.start()
-            except Exception:
-                log.exception("分离插件 %s 失败，使用主窗口实例", pid)
-                detached_plugin = plugin
-
-        win = PluginWindow(self.config, detached_plugin, plugin.name or pid)
-        win.merge_requested.connect(self._merge_plugin)
-        # 恢复保存的位置
-        det = self.config.get("window", "detached", default={}) or {}
-        pos = det.get(pid)
+            inst = self._make_detached_instance(pid) or self.manager.plugins.get(pid)
+        if inst is None:
+            return
+        title = plugin.name or pid
+        win = PluginWindow(wid, self.config, title)
+        win.add_plugin(inst)
+        win.set_merge_callback(self._on_window_merge)
+        # 恢复位置
+        det = self.config.get("windows", default={}) or {}
+        wconf = det.get(wid, {})
+        pos = wconf.get("pos")
         if pos and len(pos) == 2:
             win.move(int(pos[0]), int(pos[1]))
-        self._plugin_windows[pid] = win
+        self._plugin_windows[wid] = win
+        self._refresh_all_merge_targets()
         win.show()
-        # 更新配置 + 隐藏主窗口分区
-        self._persist_detached()
-        # 移除主窗口里该插件分区（如果有）
+        # 从主窗口移除该分区（若有）
+        self._remove_section_from_container(pid)
+        # 若用的是独立实例，主窗口原实例已无 UI，停止其 timer 防误触
+        if inst is not self.manager.plugins.get(pid):
+            try:
+                self.manager.plugins[pid].stop(grace_ms=300)
+            except Exception:
+                log.exception("停止主窗口插件 %s 失败", pid)
+        self._persist_windows()
+        QTimer.singleShot(0, lambda: self._fit_to_content(shrink=True))
+
+    def _remove_section_from_container(self, pid: str) -> None:
         for section in list(self._container._sections):
             if section.key == pid:
                 self._container._lay.removeWidget(section)
@@ -408,32 +452,115 @@ class FloatingWindow(QWidget):
                 section.deleteLater()
                 self._container._sections.remove(section)
                 break
-        QTimer.singleShot(0, lambda: self._fit_to_content(shrink=True))
 
-    def _merge_plugin(self, pid: str) -> None:
-        """把独立窗口里的插件合并回主窗口。"""
-        win = self._plugin_windows.pop(pid, None)
-        if win is not None:
-            win.close()
-            win.deleteLater()
-        # 从配置移除分离状态
-        det = dict(self.config.get("window", "detached", default={}) or {})
-        det.pop(pid, None)
-        self.config.set("window", "detached", value=det)
-        self.config.save()
-        # 主窗口可能已被隐藏（用户关过主窗口）：合并时重新显示
+    def _all_windows(self) -> dict[str, object]:
+        """返回 {window_id: window}，含主窗口和所有独立窗口。"""
+        from core.plugin_window import PluginWindow
+
+        windows = {"main": self}
+        windows.update(self._plugin_windows)
+        return windows
+
+    def _refresh_all_merge_targets(self) -> None:
+        """更新所有窗口的「合并到」目标列表。"""
+        windows = self._all_windows()
+        for wid, win in windows.items():
+            if wid == "main":
+                continue
+            targets = [(other, (windows[other].plugin.name or other)
+                        if isinstance(getattr(windows[other], "plugin", None), object) and hasattr(windows[other], "plugin")
+                        else other) for other in windows if other != wid]
+            # 目标显示名：主窗口叫「主窗口」，独立窗口用第一个插件名或 id
+            named = []
+            for other in windows:
+                if other == wid:
+                    continue
+                if other == "main":
+                    named.append(("main", "主窗口"))
+                else:
+                    w = windows[other]
+                    pids = w.plugin_ids
+                    name = pids[0] if pids else other
+                    named.append((other, f"{name}"))
+            win.set_merge_targets(named)
+
+    def _merge_from_window(self, pid: str, window_id: str) -> None:
+        """把指定插件从独立窗口合并回主窗口。"""
+        win = self._plugin_windows.get(window_id)
+        if win is None:
+            return
+        inst = win.get_plugin(pid)
+        if inst is None:
+            return
+        win.remove_plugin(pid)
         if not self.isVisible():
             self.show()
-        # 重新显示主窗口分区（用主窗口自己的实例）
-        plugin = self.manager.plugins.get(pid)
-        if plugin is not None:
-            self._rebuild_plugin_section(plugin)
+        self._add_plugin_to_main(inst)
+        # 源窗口空了就关闭
+        if win.plugin_ids == []:
+            self._plugin_windows.pop(window_id, None)
+            win.close()
+            win.deleteLater()
+        self._refresh_all_merge_targets()
+        self._persist_windows()
+        QTimer.singleShot(0, lambda: self._fit_to_content(shrink=True))
 
-    def _persist_detached(self) -> None:
-        det = {}
-        for pid, win in self._plugin_windows.items():
-            det[pid] = [win.x(), win.y()]
-        self.config.set("window", "detached", value=det)
+    def _add_plugin_to_main(self, plugin) -> None:
+        """把插件实例加进主窗口容器（复用 create_widget）。"""
+        try:
+            widget = plugin.create_widget(self._container)
+        except Exception:
+            log.exception("插件 %s 的 create_widget 失败", plugin.id)
+            return
+        title = plugin.name or plugin.id
+        self._section_titles.append((plugin.id, title))
+        self._container.add_section(plugin.id, title, widget)
+        self._rebuild_menu()
+
+    def _on_window_merge(self, source_id: str, target_id: str) -> None:
+        """把 source 窗口的全部插件合并到 target 窗口。"""
+        src = self._plugin_windows.get(source_id) or (self if source_id == "main" else None)
+        if target_id == "main":
+            dst = self
+        else:
+            dst = self._plugin_windows.get(target_id)
+        if src is None or dst is None or src is dst:
+            return
+        # 移动全部插件实例
+        for pid in list(src.plugin_ids):
+            inst = src.get_plugin(pid)
+            if inst is None:
+                continue
+            # 清空旧 UI 引用，避免 timer 触碰已删除控件
+            try:
+                inst.on_stop()
+            except Exception:
+                pass
+            src.remove_plugin(pid)
+            dst.add_plugin(inst)
+        # 源窗口是独立窗口且空了：关闭它
+        if source_id != "main" and src.plugin_ids == []:
+            win = self._plugin_windows.pop(source_id, None)
+            if win is not None:
+                win.close()
+                win.deleteLater()
+        # 主窗口隐藏时合并回来要重新显示
+        if target_id == "main" and not self.isVisible():
+            self.show()
+        self._refresh_all_merge_targets()
+        self._persist_windows()
+        QTimer.singleShot(0, lambda: self._fit_to_content(shrink=True))
+
+    def _persist_windows(self) -> None:
+        """持久化所有窗口配置（插件列表/顺序/位置/置顶）。"""
+        windows = {}
+        for wid, win in self._all_windows().items():
+            windows[wid] = {
+                "plugins": win.plugin_ids,
+                "pos": [win.x(), win.y()],
+                "topmost": bool(win.windowFlags() & Qt.WindowType.WindowStaysOnTopHint),
+            }
+        self.config.set("windows", value=windows)
         self.config.save()
 
     # ---- 系统设置（主题/透明度） ----

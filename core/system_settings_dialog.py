@@ -1,4 +1,4 @@
-"""系统设置对话框：主题、透明度、插件排序与启停。"""
+"""系统设置对话框：主题、透明度、各窗口插件顺序。"""
 import logging
 
 from PySide6.QtCore import Qt
@@ -23,7 +23,7 @@ log = logging.getLogger("usage-widget.settings")
 
 
 class SystemSettingsDialog(QDialog):
-    """系统设置：深色/浅色主题 + 背景透明度 + 插件排序/启停。"""
+    """系统设置：主题 + 透明度 + 各窗口插件顺序（可分别设置，启动恢复）。"""
 
     def __init__(self, config, window, parent=None):
         super().__init__(parent)
@@ -31,8 +31,8 @@ class SystemSettingsDialog(QDialog):
         self.window = window
         self.manager = window.manager
         self.setWindowTitle("系统设置")
-        self.setMinimumWidth(400)
-        self.setMinimumHeight(480)
+        self.setMinimumWidth(440)
+        self.setMinimumHeight(520)
 
         # ---- 主题 ----
         self._theme_combo = QComboBox()
@@ -58,26 +58,16 @@ class SystemSettingsDialog(QDialog):
         form.addRow("", self._opacity_value)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
-        # ---- 插件排序/启停 ----
-        plugins_hint = QLabel("勾选 = 启用；选中后用右侧按钮调整分区顺序。")
-        plugins_hint.setWordWrap(True)
-        plugins_hint.setStyleSheet("color: #9aa3b5; font-size: 11px;")
+        # ---- 窗口选择 + 插件排序 ----
+        win_hint = QLabel("选择窗口，调整该窗口内插件分区的顺序。")
+        win_hint.setWordWrap(True)
+        win_hint.setStyleSheet("color: #9aa3b5; font-size: 11px;")
+
+        self._window_combo = QComboBox()
+        self._window_combo.currentIndexChanged.connect(self._load_window_plugins)
 
         self._plugin_list = QListWidget()
         self._plugin_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
-        conf = self.config.get("plugins", default={}) or {}
-        self._enabled = list(conf.get("enabled") or [])
-        self._order = list(conf.get("order") or self._enabled)
-        # 已知插件（已加载 + 磁盘发现的）
-        from core.plugin_manager import discover_plugin_ids
-
-        known = set(discover_plugin_ids(self.manager.plugins_dir))
-        known |= set(self.manager.plugins.keys())
-        for pid in self._order:
-            if pid in known:
-                self._add_plugin_item(pid, pid in self._enabled)
-        for pid in sorted(known - set(self._order)):
-            self._add_plugin_item(pid, pid in self._enabled)
 
         self._up_btn = QPushButton("↑ 上移")
         self._down_btn = QPushButton("↓ 下移")
@@ -100,6 +90,14 @@ class SystemSettingsDialog(QDialog):
         list_lay.addWidget(self._plugin_list, 1)
         list_lay.addLayout(btn_col)
 
+        # 填充窗口下拉框
+        self._windows = self.window._all_windows()
+        self._window_ids = list(self._windows)
+        for wid in self._window_ids:
+            name = "主窗口" if wid == "main" else wid
+            self._window_combo.addItem(name, wid)
+        self._load_window_plugins()
+
         # ---- 按钮 ----
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
@@ -109,20 +107,30 @@ class SystemSettingsDialog(QDialog):
 
         lay = QVBoxLayout(self)
         lay.addLayout(form)
-        lay.addWidget(plugins_hint)
+        lay.addWidget(win_hint)
+        lay.addWidget(self._window_combo)
         lay.addWidget(list_row)
         lay.addWidget(buttons)
         self.setLayout(lay)
 
-    # ---- 插件列表 ----
+    # ---- 窗口插件列表 ----
 
-    def _add_plugin_item(self, pid: str, enabled: bool) -> None:
-        item = QListWidgetItem(pid)
-        item.setData(Qt.ItemDataRole.UserRole, pid)
-        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-        item.setCheckState(
-            Qt.CheckState.Checked if enabled else Qt.CheckState.Unchecked)
-        self._plugin_list.addItem(item)
+    def _current_window_id(self) -> str:
+        idx = self._window_combo.currentIndex()
+        return self._window_ids[idx] if 0 <= idx < len(self._window_ids) else "main"
+
+    def _load_window_plugins(self, *_) -> None:
+        """加载当前选中窗口的插件列表。"""
+        self._plugin_list.clear()
+        wid = self._current_window_id()
+        win = self._windows.get(wid)
+        if win is None:
+            return
+        for pid in win.plugin_ids:
+            item = QListWidgetItem(pid)
+            item.setData(Qt.ItemDataRole.UserRole, pid)
+            self._plugin_list.addItem(item)
+        self._update_plugin_buttons()
 
     def _update_plugin_buttons(self, *_) -> None:
         row = self._plugin_list.currentRow()
@@ -144,37 +152,33 @@ class SystemSettingsDialog(QDialog):
     # ---- 保存 ----
 
     def _save(self) -> None:
-        # 主题 + 透明度
         new_theme = self._theme_combo.currentData()
         new_alpha = self._opacity_slider.value() / 100.0
         self.config.set("window", "theme", value=new_theme)
         self.config.set("window", "opacity", value=round(new_alpha, 2))
 
-        # 插件顺序 + 启停
-        enabled = []
+        # 把当前选中窗口的列表写回（UI 里只改了一个窗口）
+        wid = self._current_window_id()
         order = []
         for i in range(self._plugin_list.count()):
             item = self._plugin_list.item(i)
             pid = item.data(Qt.ItemDataRole.UserRole)
             if pid:
                 order.append(pid)
-                if item.checkState() == Qt.CheckState.Checked:
-                    enabled.append(pid)
-        self.config.set("plugins", "enabled", value=enabled)
-        self.config.set("plugins", "order", value=order)
+        windows = dict(self.config.get("windows", default={}) or {})
+        wconf = dict(windows.get(wid, {}))
+        wconf["plugins"] = order
+        windows[wid] = wconf
+        self.config.set("windows", value=windows)
+        self.config.save()
 
-        # 主题/透明度即时生效
+        # 应用主题 + 透明度
         self.window.apply_theme(new_theme, new_alpha)
-
-        # 插件启停/顺序有变更才重载插件（否则只重建分区，不打扰其他插件）
-        old_order = list(self.manager.plugins)
-        old_enabled = set(old_order)
-        changed = (sorted(old_enabled) != sorted(enabled)
-                   or old_order != order)
-        if changed:
-            self.config.save()
-            self.window._reload_plugins()
-        else:
-            self.config.save()
-            self.window.populate_sections()
+        # 重建对应窗口的分区（顺序生效）
+        target = self._windows.get(wid)
+        if target is not None:
+            if wid == "main":
+                self.window.populate_sections()
+            else:
+                target.rebuild()
         self.accept()
