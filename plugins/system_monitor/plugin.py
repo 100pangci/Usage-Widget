@@ -36,9 +36,10 @@ from .collector import (
 
 log = logging.getLogger("system_monitor.plugin")
 
-# ---- 主题颜色（深色/浅色两套，跟随 core.theme）----
+# ---- 主题颜色：跟随 core.theme（唯一颜色源）----
 
-_COLORS_DARK = {
+# 无框架独立运行（如直接跑插件）时的回退颜色
+_FALLBACK_COLORS = {
     "dim": "#9aa3b5",
     "text": "#dfe3ea",
     "green": "#7cc76b",
@@ -46,22 +47,23 @@ _COLORS_DARK = {
     "red": "#e06c5a",
 }
 
-_COLORS_LIGHT = {
-    "dim": "#5a6270",
-    "text": "#1f2430",
-    "green": "#3f9e4f",
-    "amber": "#b8860b",
-    "red": "#d64545",
-}
-
 
 def _theme_colors() -> dict:
     try:
+        from core.theme import color
+
+        return {k: color(k) for k in ("dim", "text", "green", "amber", "red")}
+    except ImportError:
+        return _FALLBACK_COLORS
+
+
+def _is_dark_theme() -> bool:
+    try:
         from core.theme import is_dark
 
-        return _COLORS_DARK if is_dark() else _COLORS_LIGHT
+        return is_dark()
     except ImportError:
-        return _COLORS_DARK  # 独立运行（无框架）时用深色
+        return True
 
 
 def DIM() -> str:
@@ -267,10 +269,11 @@ class NetSpark(QWidget):
             p.drawPath(line)
 
         draw_side(self._up, GREEN(), -1)     # 上行（绿色，上半）
-        draw_side(self._down, "#4f8cff", 1)  # 下行（蓝色，下半）
+        draw_side(self._down, ACCENT, 1)     # 下行（蓝色，下半）
 
-        # 中间分隔线
-        p.setPen(_hex_color("#ffffff", 20))
+        # 中间分隔线（跟随主题：深色用白、浅色用黑，透明度低）
+        sep_hex = "#ffffff" if _is_dark_theme() else "#000000"
+        p.setPen(_hex_color(sep_hex, 26))
         p.drawLine(0, int(mid), w, int(mid))
         p.end()
 

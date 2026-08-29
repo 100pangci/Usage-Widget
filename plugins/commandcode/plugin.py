@@ -47,30 +47,24 @@ DEFAULT_SETTINGS = {
 
 ACCENT = "#4f8cff"
 
-# ---- 主题颜色（深色/浅色两套，跟随 core.theme）----
+# ---- 主题颜色：跟随 core.theme（唯一颜色源）----
 
-_COLORS_DARK = {
+# 无框架独立运行（如直接跑插件）时的回退颜色
+_FALLBACK_COLORS = {
     "dim": "#9aa3b5",
     "green": "#7cc76b",
     "amber": "#e5b94d",
     "red": "#e06c5a",
 }
 
-_COLORS_LIGHT = {
-    "dim": "#5a6270",
-    "green": "#3f9e4f",
-    "amber": "#b8860b",
-    "red": "#d64545",
-}
-
 
 def _theme_colors() -> dict:
     try:
-        from core.theme import is_dark
+        from core.theme import color
 
-        return _COLORS_DARK if is_dark() else _COLORS_LIGHT
+        return {k: color(k) for k in ("dim", "green", "amber", "red")}
     except ImportError:
-        return _COLORS_DARK  # 独立运行（无框架）时用深色
+        return _FALLBACK_COLORS
 
 
 def DIM() -> str:

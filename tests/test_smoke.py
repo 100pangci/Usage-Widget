@@ -240,19 +240,19 @@ def test_theme_switching():
     set_theme(LIGHT)
     assert not is_dark()
     assert get_theme() == LIGHT
-    assert color("dim") == "#5a6270"
-    assert color("text") == "#1f2430"
+    assert color("dim") == "#4b525c"
+    assert color("text") == "#23272f"
 
     # 非法值回退深色
     set_theme("weird")
     assert is_dark()
 
-    # 插件取色跟随主题
+    # 插件取色跟随主题（唯一颜色源：core.theme）
     from plugins.system_monitor import plugin as sm
 
     set_theme(DARK)
     assert sm.DIM() == "#9aa3b5"
     set_theme(LIGHT)
-    assert sm.DIM() == "#5a6270"
+    assert sm.DIM() == "#4b525c"
     set_theme(DARK)
 
