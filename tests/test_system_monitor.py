@@ -8,11 +8,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from plugins.system_monitor.collector import (
     NetSampler,
     cpu_percent,
-    disk_percent,
+    disk_io_percent,
+    gpu_count,
+    gpu_names,
+    gpu_stats,
     mem_percent,
     uptime_hours,
 )
-from plugins.system_monitor.plugin import _fmt_speed, _fmt_uptime
+from plugins.system_monitor.plugin import _fmt_mb, _fmt_speed, _fmt_uptime
 
 
 # ---- 指标采集 ----
@@ -28,13 +31,28 @@ def test_mem_percent_range():
     assert 0 <= v <= 100
 
 
-def test_disk_percent_range():
-    v = disk_percent()
+def test_disk_io_percent_range():
+    v = disk_io_percent()
     assert 0 <= v <= 100
 
 
 def test_uptime_positive():
     assert uptime_hours() > 0
+
+
+def test_gpu_api_returns_lists():
+    """GPU 采集 API：返回列表，多卡时每卡一项（无卡时为空列表）。"""
+    count = gpu_count()
+    names = gpu_names()
+    stats = gpu_stats()
+    assert isinstance(names, list)
+    assert isinstance(stats, list)
+    assert len(names) == count
+    assert len(stats) == count
+    for s in stats:
+        assert 0 <= s["util"] <= 100
+        assert s["mem_used_mb"] >= 0
+        assert s["mem_total_mb"] >= 0
 
 
 def test_net_sampler_returns_speed():
@@ -59,6 +77,12 @@ def test_fmt_uptime():
     assert _fmt_uptime(30.5) == "1天 6小时"
     assert _fmt_uptime(50) == "2天 2小时"
     assert _fmt_uptime(0.5) == "30分"
+
+
+def test_fmt_mb():
+    assert _fmt_mb(512) == "512M"
+    assert _fmt_mb(2048) == "2.0G"
+    assert _fmt_mb(10240) == "10G"
 
 
 # ---- UI 刷新 ----
@@ -86,6 +110,8 @@ def test_plugin_tick_updates_labels():
     # 曲线有数据点
     assert len(plugin._sparks["cpu"]._data) == 1
     assert len(plugin._net_spark._down) == 1
+    # GPU 分区数量与 gpu_count 一致（无卡时为 0）
+    assert len(plugin._gpu_sparks) == gpu_count()
     plugin.on_stop()
     assert plugin._sparks == {}
     assert plugin._net_spark is None

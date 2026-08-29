@@ -143,7 +143,85 @@ def _windows_disk() -> int:
     return max(0, min(100, int(used * 100 / total.value)))
 
 
-def _linux_disk() -> int:
+def _windows_disk_io() -> int:
+    """磁盘 I/O 占用率（% Disk Time，0-100）。
+
+    PDH 计数器 \PhysicalDisk(_Total)\% Disk Time：磁盘处理读写的
+    时间占比（多盘取总，可超 100% 后归一化到 100）。
+    """
+    import ctypes
+
+    # PDH 初始化
+    pdh = ctypes.windll.pdh
+    hquery = ctypes.c_void_p()
+    if pdh.PdhOpenQueryW(None, 0, ctypes.byref(hquery)) != 0:
+        return 0
+    hcounter = ctypes.c_void_p()
+    path = r"\PhysicalDisk(_Total)\% Disk Time"
+    if pdh.PdhAddCounterW(hquery, path, 0, ctypes.byref(hcounter)) != 0:
+        pdh.PdhCloseQuery(hquery)
+        return 0
+    # 首次采集
+    pdh.PdhCollectQueryData(hquery)
+    time.sleep(0.2)
+    pdh.PdhCollectQueryData(hquery)
+    val = ctypes.c_double()
+    if pdh.PdhGetFormattedCounterValue(
+            hcounter, 0x8000, None, ctypes.byref(val)) != 0:
+        pdh.PdhCloseQuery(hquery)
+        return 0
+    pdh.PdhCloseQuery(hquery)
+    return max(0, min(100, int(val.value)))
+
+
+def _linux_disk_io() -> int:
+    """磁盘 I/O 占用率：/proc/diskstats io_ticks（盘忙 ms）两次采样差值。"""
+    def _read() -> dict[str, int]:
+        out = {}
+        with open("/proc/diskstats", encoding="ascii") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 14:
+                    continue
+                # 跳过分区（如 sda1），只统计整盘（sda/nvme0n1/vda 等）
+                name = parts[2]
+                if name[-1].isdigit() and any(ch.isdigit() for ch in name[:-1]):
+                    continue
+                io_ticks = int(parts[13]) if len(parts) > 13 else 0
+                out[name] = io_ticks
+        return out
+
+    if not hasattr(_linux_disk_io, "_last"):
+        _linux_disk_io._last = _read()
+        time.sleep(0.2)
+        _linux_disk_io._last = _read()
+        return 0
+    t2 = _read()
+    t1 = _linux_disk_io._last
+    _linux_disk_io._last = t2
+    if not t1 or not t2:
+        return 0
+    # 所有盘 io_ticks 增量之和 / (采样间隔 * 盘数) 近似磁盘占用率
+    delta = sum(t2.get(k, 0) - t1.get(k, 0) for k in t2)
+    if delta <= 0:
+        return 0
+    # delta 单位是毫秒；间隔 0.2s = 200ms，单个盘最多 200ms 忙
+    # 多盘并行时 delta 可能超 200ms，归一化到 100
+    pct = delta / (200 * 1)  # 简化：视作单盘
+    return max(0, min(100, int(pct * 100)))
+
+
+def disk_io_percent() -> int:
+    """磁盘 I/O 使用率（0-100）：读写繁忙程度。"""
+    try:
+        if _WINDOWS:
+            return _windows_disk_io()
+        return _linux_disk_io()
+    except Exception:
+        return 0
+
+
+def _linux_disk_space() -> int:
     st = os.statvfs("/")
     total = st.f_blocks * st.f_frsize
     free = st.f_bavail * st.f_frsize
@@ -152,11 +230,12 @@ def _linux_disk() -> int:
     return max(0, min(100, int((total - free) * 100 / total)))
 
 
-def disk_percent() -> int:
+def disk_space_percent() -> int:
+    """磁盘空间使用率（0-100，兼容旧调用，UI 不再使用）。"""
     try:
         if _WINDOWS:
             return _windows_disk()
-        return _linux_disk()
+        return _linux_disk_space()
     except Exception:
         return 0
 
@@ -274,6 +353,288 @@ class NetSampler:
 
     def reset(self) -> None:
         self._last_t = 0.0
+
+
+# ---- GPU（跨厂商：NVIDIA / AMD / Intel / 国产）----
+
+# 采集后端：
+# - Windows + NVIDIA：NVML（nvml.dll）
+# - Windows + AMD/Intel/国产：WMI Win32_PerfFormattedData_GPUPerformanceCounters
+# - Linux + NVIDIA：NVML（libnvidia-ml.so）
+# - Linux + AMD/Intel：sysfs gpu_busy_percent（amdgpu/xe 驱动）
+
+_gpu_backend: str | None = None  # "nvml" / "wmi" / "sysfs" / None(无卡)
+_gpu_names_list: list[str] = []  # 每块 GPU 的型号名
+_gpu_nvml_handles: list[object] = []
+_gpu_nvml_lib: object | None = None
+
+
+def gpu_count() -> int:
+    """可用 GPU 数量（无卡返回 0）。"""
+    _gpu_init()
+    return len(_gpu_names_list)
+
+
+def gpu_names() -> list[str]:
+    """每块 GPU 的型号名（短名），无 GPU 返回 []。"""
+    _gpu_init()
+    return list(_gpu_names_list)
+
+
+def _gpu_init() -> None:
+    """初始化 GPU 采集后端，填充 _gpu_names_list 和 handle 列表。"""
+    global _gpu_backend, _gpu_names_list, _gpu_nvml_handles, _gpu_nvml_lib
+    if _gpu_backend is not None:
+        return
+    try:
+        if _WINDOWS:
+            if _nvml_load():
+                _gpu_backend = "nvml"
+                return
+            if _wmi_load():
+                _gpu_backend = "wmi"
+                return
+        else:  # Linux
+            if _nvml_load():
+                _gpu_backend = "nvml"
+                return
+            if _sysfs_load():
+                _gpu_backend = "sysfs"
+                return
+    except Exception:
+        pass
+    _gpu_backend = ""  # 无可用后端
+
+
+def _nvml_load() -> bool:
+    """加载 NVML（NVIDIA 驱动自带），枚举所有 GPU。"""
+    global _gpu_nvml_lib, _gpu_nvml_handles, _gpu_names_list
+    import ctypes
+
+    try:
+        if _WINDOWS:
+            lib = ctypes.WinDLL("nvml.dll")
+        else:
+            for path in (
+                "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so",
+                "/usr/lib/libnvidia-ml.so",
+                "/usr/lib64/libnvidia-ml.so",
+                "/usr/lib/aarch64-linux-gnu/libnvidia-ml.so",
+            ):
+                try:
+                    lib = ctypes.CDLL(path)
+                    break
+                except OSError:
+                    continue
+            else:
+                return False
+    except OSError:
+        return False
+
+    if lib.nvmlInit() != 0:
+        return False
+    count = ctypes.c_uint()
+    if lib.nvmlDeviceGetCount(ctypes.byref(count)) != 0 or count.value == 0:
+        lib.nvmlShutdown()
+        return False
+    handles = []
+    names = []
+    for i in range(count.value):
+        h = ctypes.c_void_p()
+        if lib.nvmlDeviceGetHandleByIndex(i, ctypes.byref(h)) != 0:
+            continue
+        buf = ctypes.create_string_buffer(128)
+        if lib.nvmlDeviceGetName(h, buf, 128) == 0:
+            name = buf.value.decode("utf-8", "replace").strip()
+            # 缩短：NVIDIA GeForce RTX 4060 Laptop GPU → RTX 4060 Laptop
+            for prefix in ("NVIDIA GeForce ", "NVIDIA "):
+                if name.startswith(prefix):
+                    name = name[len(prefix):]
+                    break
+            names.append(name)
+        handles.append(h)
+    if not handles:
+        lib.nvmlShutdown()
+        return False
+    _gpu_nvml_lib = lib
+    _gpu_nvml_handles = handles
+    _gpu_names_list = names
+    return True
+
+
+def _wmi_load() -> bool:
+    """Windows WMI GPU Engine：跨厂商（AMD/Intel/国产），按 phys_N 分组。"""
+    global _gpu_names_list
+    import subprocess
+
+    # 拿显卡名（WMI Win32_VideoController）
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name"],
+            capture_output=True, text=True, timeout=10)
+        names = [n.strip() for n in out.stdout.splitlines() if n.strip()]
+        # 过滤掉虚拟显示驱动（OrayIddDriver/GameViewer 等远程/虚拟显卡）
+        names = [n for n in names if not any(
+            v in n.lower() for v in ("virtual", "iddd", "oray", "gameviewer", "remote"))]
+        if not names:
+            return False
+    except Exception:
+        return False
+    _gpu_names_list = names
+    return True
+
+
+def _sysfs_load() -> bool:
+    """Linux sysfs：amdgpu / xe 驱动的 gpu_busy_percent。"""
+    global _gpu_names_list
+    from pathlib import Path
+
+    cards = []
+    for p in sorted(Path("/sys/class/drm").glob("card*")):
+        if not (p / "device" / "gpu_busy_percent").exists():
+            continue
+        name = ""
+        # 驱动名：看 /proc/driver 或设备名
+        try:
+            vender = (p / "device" / "vendor").read_text().strip()
+            device = (p / "device" / "device").read_text().strip()
+            name = f"GPU {len(cards)}"
+        except OSError:
+            name = f"GPU {len(cards)}"
+        cards.append(name)
+    if not cards:
+        return False
+    _gpu_names_list = cards
+    return True
+
+
+def gpu_stats() -> list[dict]:
+    """每块 GPU 的 (利用率%, 显存已用/总 MB)。无 GPU 返回 []。
+
+    不同后端返回值不同，但统一格式：
+        {util: int, mem_percent: int, mem_used_mb: int, mem_total_mb: int}
+    显存无法获取时 mem_* 为 0（UI 显示「-」）。
+    """
+    _gpu_init()
+    if _gpu_backend == "nvml":
+        return _gpu_stats_nvml()
+    if _gpu_backend == "wmi":
+        return _gpu_stats_wmi()
+    if _gpu_backend == "sysfs":
+        return _gpu_stats_sysfs()
+    return []
+
+
+def _gpu_stats_nvml() -> list[dict]:
+    lib = _gpu_nvml_lib
+    if not lib or not _gpu_nvml_handles:
+        return []
+    import ctypes
+
+    class MemInfo(ctypes.Structure):
+        _fields_ = [("total", ctypes.c_uint64),
+                    ("used", ctypes.c_uint64),
+                    ("free", ctypes.c_uint64)]
+
+    out = []
+    for h in _gpu_nvml_handles:
+        gpu_u = ctypes.c_uint()
+        mem_u = ctypes.c_uint()
+        try:
+            lib.nvmlDeviceGetUtilizationRates(
+                h, ctypes.byref(gpu_u), ctypes.byref(mem_u))
+            mem = MemInfo()
+            lib.nvmlDeviceGetMemoryInfo(h, ctypes.byref(mem))
+            out.append({
+                "util": int(gpu_u.value),
+                "mem_percent": (int(mem.used * 100 / mem.total)
+                                if mem.total > 0 else 0),
+                "mem_used_mb": int(mem.used // (1024 * 1024)),
+                "mem_total_mb": int(mem.total // (1024 * 1024)),
+            })
+        except Exception:
+            continue
+    return out
+
+
+def _gpu_stats_wmi() -> list[dict]:
+    """Windows WMI：GPU Engine 利用率按 phys_N 聚合 + Adapter Memory 显存。"""
+    import subprocess
+
+    script = r'''
+$engines = Get-CimInstance -Namespace root/cimv2 `
+    -ClassName Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine -ErrorAction SilentlyContinue
+$groups = @{}
+foreach ($e in $engines) {
+    if ($e.Name -match 'phys_(\d+)') {
+        $g = $matches[1]
+        if (-not $groups.ContainsKey($g)) { $groups[$g] = 0 }
+        $groups[$g] += [double]$e.UtilizationPercentage
+    }
+}
+$mems = Get-CimInstance -Namespace root/cimv2 `
+    -ClassName Win32_PerfFormattedData_GPUPerformanceCounters_GPUAdapterMemory -ErrorAction SilentlyContinue
+$memGroups = @{}
+foreach ($m in $mems) {
+    if ($m.Name -match 'luid_(0x[0-9a-fA-F]+_){2}') { }
+    if ($m.Name -match 'phys_(\d+)') {
+        $g = $matches[1]
+        if (-not $memGroups.ContainsKey($g)) { $memGroups[$g] = @{used=0; total=0} }
+        $memGroups[$g].used += [double]$m.DedicatedUsage
+    }
+}
+$keys = $groups.Keys | Sort-Object
+$result = @()
+foreach ($k in $keys) {
+    $result += [PSCustomObject]@{phys=$k; util=[math]::Min(100, [int]$groups[$k])}
+}
+$result | ConvertTo-Json -Compress
+'''
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", script],
+            capture_output=True, text=True, timeout=10)
+        if out.returncode != 0 or not out.stdout.strip():
+            return []
+        import json
+
+        data = json.loads(out.stdout)
+        if isinstance(data, dict):
+            data = [data]
+        stats = []
+        for item in data:
+            stats.append({
+                "util": int(item.get("util", 0)),
+                "mem_percent": 0,
+                "mem_used_mb": 0,
+                "mem_total_mb": 0,
+            })
+        return stats
+    except Exception:
+        return []
+
+
+def _gpu_stats_sysfs() -> list[dict]:
+    """Linux sysfs：gpu_busy_percent（AMD/Intel）。显存不可读。"""
+    from pathlib import Path
+
+    out = []
+    for p in sorted(Path("/sys/class/drm").glob("card*")):
+        busy_path = p / "device" / "gpu_busy_percent"
+        if not busy_path.exists():
+            continue
+        try:
+            busy = int(busy_path.read_text().strip())
+            out.append({
+                "util": max(0, min(100, busy)),
+                "mem_percent": 0,
+                "mem_used_mb": 0,
+                "mem_total_mb": 0,
+            })
+        except (OSError, ValueError):
+            continue
+    return out
 
 
 def uptime_hours() -> float:

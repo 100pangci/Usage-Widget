@@ -21,7 +21,15 @@ from PySide6.QtWidgets import (
 
 from plugins.base import Plugin
 
-from .collector import NetSampler, cpu_percent, disk_percent, mem_percent, uptime_hours
+from .collector import (
+    NetSampler,
+    cpu_percent,
+    disk_io_percent,
+    gpu_names,
+    gpu_stats,
+    mem_percent,
+    uptime_hours,
+)
 
 log = logging.getLogger("system_monitor.plugin")
 
@@ -200,14 +208,16 @@ class NetSpark(QWidget):
 class SystemMonitorPlugin(Plugin):
     id = "system_monitor"
     name = "系统监控"
-    version = "0.2.0"
-    description = "CPU/内存/磁盘/网络实时曲线、开机时长"
+    version = "0.3.0"
+    description = "CPU/内存/磁盘/GPU/网络实时曲线、开机时长"
     refresh_interval = 1000
 
     def __init__(self, context=None):
         super().__init__(context)
         self._sparks: dict[str, SparkLine] = {}
         self._pct_labels: dict[str, QLabel] = {}
+        self._mem_labels: dict[str, QLabel] = {}
+        self._gpu_sparks: list[tuple[str, SparkLine, QLabel, QLabel]] = []
         self._net_spark: NetSpark | None = None
         self._net_labels: dict[str, QLabel] = {}
         self._uptime_label: QLabel | None = None
@@ -243,6 +253,36 @@ class SystemMonitorPlugin(Plugin):
         make_gauge("cpu", "CPU", "#4f8cff")
         make_gauge("mem", "内存", "#e5b94d")
         make_gauge("disk", "磁盘", "#7cc76b")
+
+        # ---- GPU：自动枚举，每块一行曲线 ----
+        from .collector import gpu_names
+        gpu_list = gpu_names()
+        if gpu_list:
+            gpu_sep = QFrame()
+            gpu_sep.setFrameShape(QFrame.Shape.HLine)
+            gpu_sep.setStyleSheet("color: rgba(255,255,255,26);")
+            lay.addWidget(gpu_sep)
+        for i, gname in enumerate(gpu_list):
+            name = QLabel(gname)
+            name.setStyleSheet(f"font-size: 11px; color: {DIM};")
+            name.setToolTip(gname)
+            pct = QLabel("--")
+            pct.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {DIM};")
+            mem_lbl = QLabel("")
+            mem_lbl.setStyleSheet(f"font-size: 10px; color: {DIM};")
+            head = QWidget()
+            head_lay = QHBoxLayout(head)
+            head_lay.setContentsMargins(0, 0, 0, 0)
+            head_lay.setSpacing(6)
+            head_lay.addWidget(name)
+            head_lay.addStretch(1)
+            head_lay.addWidget(pct)
+            head_lay.addWidget(mem_lbl)
+            lay.addWidget(head)
+
+            spark = SparkLine("#c67cff")  # GPU 紫色
+            lay.addWidget(spark)
+            self._gpu_sparks.append((f"gpu{i}", spark, pct, mem_lbl))
 
         line = QFrame()
         line.setFrameShape(QFrame.Shape.HLine)
@@ -310,11 +350,28 @@ class SystemMonitorPlugin(Plugin):
         self._pct_labels["mem"].setStyleSheet(
             f"font-size: 13px; font-weight: 700; color: {percent_color(mem)};")
 
-        disk = disk_percent()
+        disk = disk_io_percent()
         self._sparks["disk"].add(disk)
         self._pct_labels["disk"].setText(f"{disk}%")
         self._pct_labels["disk"].setStyleSheet(
             f"font-size: 13px; font-weight: 700; color: {percent_color(disk)};")
+
+        # GPU：多卡自动更新
+        from .collector import gpu_stats
+        gpu_data = gpu_stats()
+        for idx, (key, spark, pct_lbl, mem_lbl) in enumerate(self._gpu_sparks):
+            if idx < len(gpu_data):
+                d = gpu_data[idx]
+                util = d["util"]
+                spark.add(util)
+                pct_lbl.setText(f"{util}%")
+                pct_lbl.setStyleSheet(
+                    f"font-size: 12px; font-weight: 700; color: {percent_color(util)};")
+                if d["mem_total_mb"] > 0:
+                    mem_lbl.setText(
+                        f"{_fmt_mb(d['mem_used_mb'])}/{_fmt_mb(d['mem_total_mb'])}")
+                else:
+                    mem_lbl.setText("")
 
         down, up = self._net.sample()
         if self._net_spark is not None:
@@ -329,10 +386,19 @@ class SystemMonitorPlugin(Plugin):
     def on_stop(self) -> None:
         self._sparks = {}
         self._pct_labels = {}
+        self._gpu_sparks = []
         self._net_spark = None
         self._net_labels = {}
         self._uptime_label = None
         self._net.reset()
+
+
+def _fmt_mb(mb: int) -> str:
+    """MB → 自适应单位（GB 显示小数，MB 显示整数）。"""
+    if mb >= 1024:
+        gb = mb / 1024
+        return f"{gb:.1f}G" if gb < 10 else f"{gb:.0f}G"
+    return f"{mb}M"
 
 
 def _fmt_speed(kb_per_s: float) -> str:
