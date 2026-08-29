@@ -3,14 +3,12 @@ import logging
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QVBoxLayout,
-    QWidget,
 )
 
 from .plugin import ALL_ITEMS
@@ -21,7 +19,12 @@ _NAME_MAP = dict(ALL_ITEMS)
 
 
 class SettingsDialog(QDialog):
-    """顺序列表（可拖拽）+ 显隐勾选。"""
+    """顺序列表（可拖拽）+ 显隐勾选。
+
+    注意：必须用内置 checkbox（ItemIsUserCheckable + setCheckState），
+    不能 setItemWidget(QCheckBox)——itemWidget 会拦截拖拽事件，
+    导致 InternalMove 完全拖不动。
+    """
 
     def __init__(self, plugin, parent=None):
         super().__init__(parent)
@@ -37,6 +40,7 @@ class SettingsDialog(QDialog):
         self._list = QListWidget()
         self._list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
         self._list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self._list.setDefaultDropAction(Qt.DropAction.MoveAction)
         # 重新加载当前设置
         plugin.load_settings()
         for key in plugin.settings.get("order") or []:
@@ -55,14 +59,17 @@ class SettingsDialog(QDialog):
         self.setLayout(lay)
 
     def _add_item(self, key: str, checked: bool) -> None:
-        item = QListWidgetItem()
-        # 用 checkbox 表示显隐
-        cb = QCheckBox(_NAME_MAP.get(key, key))
-        cb.setChecked(checked)
+        item = QListWidgetItem(_NAME_MAP.get(key, key))
         item.setData(Qt.ItemDataRole.UserRole, key)
-        item.setSizeHint(cb.sizeHint())
+        item.setFlags(
+            item.flags()
+            | Qt.ItemFlag.ItemIsUserCheckable
+            | Qt.ItemFlag.ItemIsDragEnabled
+            | Qt.ItemFlag.ItemIsDropEnabled
+        )
+        item.setCheckState(
+            Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
         self._list.addItem(item)
-        self._list.setItemWidget(item, cb)
 
     def _save(self) -> None:
         order = []
@@ -70,10 +77,9 @@ class SettingsDialog(QDialog):
         for i in range(self._list.count()):
             item = self._list.item(i)
             key = item.data(Qt.ItemDataRole.UserRole)
-            widget = self._list.itemWidget(item)
             if key:
                 order.append(key)
-                if widget is not None and not widget.isChecked():
+                if item.checkState() != Qt.CheckState.Checked:
                     hidden.append(key)
         self.plugin.settings["order"] = order
         self.plugin.settings["hidden"] = hidden
