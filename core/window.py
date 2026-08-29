@@ -46,6 +46,7 @@ class FloatingWindow(PluginWindow):
         self.window_manager = WindowManager(
             config, plugin_manager, window_factory=_factory)
         self.window_manager.create_main(self)  # 注册自己为主窗口
+        self.window_manager.set_refresh_callback(self._on_window_layout_changed)
         self.bind_manager(self.window_manager)
         self.window_manager.restore()
 
@@ -57,6 +58,11 @@ class FloatingWindow(PluginWindow):
             self._toggle_topmost()
         elif is_kde_session():
             QTimer.singleShot(800, lambda: kwin_set_always_on_top(True))
+
+    def _on_window_layout_changed(self) -> None:
+        """窗口/插件分配变化：刷新所有窗口的合并目标 + 主窗口菜单。"""
+        self._refresh_all_merge_targets()
+        self._refresh_main_menu()
 
     # ---- 插件分区（主窗口的容器操作） ----
 

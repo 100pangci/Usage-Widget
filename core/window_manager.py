@@ -24,6 +24,7 @@ class WindowManager:
         self.windows: dict[str, object] = {}  # window_id -> PluginWindow
         self._main_window = None
         self._window_factory = window_factory  # (window_id, wc) -> PluginWindow
+        self._refresh_callback = None  # 窗口内容变化时刷新所有窗口菜单
 
     # ---- 窗口创建 ----
 
@@ -36,6 +37,14 @@ class WindowManager:
         self._main_window = window
         self.windows[MAIN_ID] = window
         return window
+
+    def set_refresh_callback(self, callback) -> None:
+        """注入回调：窗口/插件分配变化后刷新所有窗口的菜单。"""
+        self._refresh_callback = callback
+
+    def _notify_change(self) -> None:
+        if self._refresh_callback is not None:
+            self._refresh_callback()
 
     def create_window(self, window_id: str, window_cls, *args, **kwargs):
         self.windows[window_id] = window_cls(*args, **kwargs)
@@ -69,6 +78,7 @@ class WindowManager:
         if inst is None:
             return False
         self.attach_plugin(dst_id, inst)
+        self._notify_change()
         return True
 
     # ---- 窗口管理 ----
@@ -85,6 +95,7 @@ class WindowManager:
                     win.remove_plugin(pid)
                     self.attach_plugin(MAIN_ID, inst)
         win.deleteLater()
+        self._notify_change()
         self.persist()
 
     def all_plugin_ids(self) -> list[str]:
@@ -105,7 +116,41 @@ class WindowManager:
         for pid in list(self.windows[src_id].plugin_ids):
             self.move_plugin(src_id, dst_id, pid)
         self.close_window(src_id, merge_plugins=False)
+        self._notify_change()
         self.persist()
+
+    def split_window(self, window_id: str) -> None:
+        """把窗口里每个插件拆成独立窗口（源窗口清空后关闭）。"""
+        win = self.windows.get(window_id)
+        if win is None:
+            return
+        plugins = [win.get_plugin(pid) for pid in list(win.plugin_ids)]
+        plugins = [p for p in plugins if p is not None]
+        if not plugins:
+            return
+        if window_id == MAIN_ID:
+            # 主窗口：每个插件拆成独立窗口，主窗口保留（变空）
+            for plugin in plugins:
+                self.move_plugin(MAIN_ID, self._new_detached(plugin), plugin.id)
+            self._notify_change()
+            self.persist()
+        else:
+            # 子窗口：第一个插件留在本窗口，其余拆走，最后关闭空窗口
+            for plugin in plugins[1:]:
+                self.move_plugin(window_id, self._new_detached(plugin), plugin.id)
+            self.close_window(window_id, merge_plugins=False)
+            self._notify_change()
+            self.persist()
+
+    def _new_detached(self, plugin) -> str:
+        """创建新的独立窗口并挂载插件，返回 window_id。"""
+        wid = self.next_window_id()
+        self._spawn_window(wid, {})
+        self.attach_plugin(wid, plugin)
+        win = self.windows.get(wid)
+        if win is not None:
+            win.show()
+        return wid
 
     # ---- 启动恢复 ----
 

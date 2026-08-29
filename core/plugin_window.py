@@ -202,6 +202,10 @@ class PluginWindow(QWidget):
         self._merge_menu = self._menu.addMenu("合并到")
         self._rebuild_merge_menu()
 
+        split_action = QAction("拆分（每个插件独立窗口）", self)
+        split_action.triggered.connect(self._request_split)
+        self._menu.addAction(split_action)
+
         topmost_action = QAction("置顶", self)
         topmost_action.setCheckable(True)
         topmost_action.setChecked(True)
@@ -216,13 +220,26 @@ class PluginWindow(QWidget):
         close_action.triggered.connect(self._user_close)
         self._menu.addAction(close_action)
 
+    def _request_split(self) -> None:
+        if self._manager is not None:
+            self._manager.split_window(self.window_id)
+
     def _user_close(self) -> None:
         self._user_closing = True
         self.close()
 
     def _rebuild_merge_menu(self) -> None:
         self._merge_menu.clear()
-        for wid, name in self._targets:
+        # 只列非空窗口（有插件的才可合并过去）
+        visible = []
+        if self._manager is not None:
+            for wid, name in self._targets:
+                win = self._manager.windows.get(wid)
+                if win is not None and win.plugin_ids:
+                    visible.append((wid, name))
+        else:
+            visible = self._targets
+        for wid, name in visible:
             action = QAction(name, self._merge_menu)
             action.triggered.connect(
                 lambda _=False, t=wid: self._request_merge(t))
