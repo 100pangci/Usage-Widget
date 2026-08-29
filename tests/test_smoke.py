@@ -30,7 +30,7 @@ def test_default_config_created():
         cfg = Config(path)
         assert path == str(cfg.path)
         assert cfg.get("window", "opacity") == 0.92
-        assert cfg.get("plugins", "enabled") == ["clock", "opencode_usage", "commandcode"]
+        assert cfg.get("plugins", "enabled") == ["clock", "opencode_usage", "commandcode", "system_monitor"]
         cfg.set("window", "opacity", value=0.5)
         cfg.save()
         cfg2 = Config(path)
@@ -42,6 +42,7 @@ def test_discover_clock():
     assert "clock" in discover_plugin_ids(plugins_dir)
     assert "opencode_usage" in discover_plugin_ids(plugins_dir)
     assert "commandcode" in discover_plugin_ids(plugins_dir)
+    assert "system_monitor" in discover_plugin_ids(plugins_dir)
 
 
 def test_import_and_instantiate():
@@ -58,6 +59,7 @@ def test_manager_load(config):
     assert "clock" in loaded
     assert "opencode_usage" in loaded
     assert "commandcode" in loaded
+    assert "system_monitor" in loaded
     assert "clock" in manager.plugins
 
 
@@ -223,3 +225,4 @@ def test_reload_no_clipped_labels():
         assert clipped() == 0
         # 窗口高度与 reload 前一致（内容相同则尺寸应不变）
         assert win.height() > 0
+
