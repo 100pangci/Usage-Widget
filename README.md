@@ -8,6 +8,8 @@
 
 - 无边框半透明悬浮窗，左键拖动、右键菜单、Esc 关闭
 - 插件化：`plugins/<id>/plugin.py` 一个文件即可接入，支持热重载（右键重新加载）
+- 插件自动发现：新放进 `plugins/`（或发行版 `plugin/`）目录的插件自动启用，
+  无需改配置；用户从 `enabled` 里删掉的插件不会被自动拉回来
 - 单窗口分区显示，右键菜单可单独显隐各分区
 - 配置自动生成与持久化（`~/.config/usage-widget/config.json`）
 - 插件加载失败自动跳过，不影响其他插件
@@ -71,10 +73,37 @@ class MyPlugin(Plugin):
 
 通用控件见 `ui/base_widgets.py`：`TextRow`（标签+数值行）、`BarGauge`（带标签进度条）。
 
+### 插件设置对话框
+
+实现 `settings_dialog(parent)` 返回 `QDialog`，右键菜单「插件设置」会弹出；
+对话框保存后**只重建该插件自己的分区**（不重载其他插件）：
+
+```python
+class MyPlugin(Plugin):
+    def settings_dialog(self, parent=None):
+        return MySettingsDialog(self, parent)   # QDialog 子类
+```
+
+设置持久化建议放插件数据目录 `~/.usage-widget/plugin/<id>/`（框架自动创建），
+参考 `plugins/system_monitor/settings_dialog.py`（顺序 + 显隐的自定义设置）。
+
+### 单个分区重建
+
+框架提供 `_rebuild_plugin_section(plugin)`（`core/window.py`）：只重建指定
+插件的分区 widget，保留折叠状态，**不影响其他插件**。插件设置保存后框架
+自动调用，无需手动处理；若需从插件内主动触发，可自行在对话框 accept 后
+调用窗口的该方法。
+
+### 插件数据目录
+
+`self.data_dir` 指向 `~/.usage-widget/plugin/<id>/`，cookie、settings.json 等
+持久化数据放这里（发行版同样适用，权限 600）。
+
 ### 启用/排序
 
 `config.json` 中 `plugins.enabled` 控制启用列表，`plugins.order` 控制分区顺序，
-`plugins.settings.<id>` 存放插件私有配置。
+`plugins.settings.<id>` 存放插件私有配置。新插件（目录里出现但不在配置中的）
+会被自动补到 `enabled`/`order` 末尾并持久化；已不存在的插件自动从配置清理。
 
 ### 调试
 
@@ -83,6 +112,7 @@ class MyPlugin(Plugin):
 ```
 
 改完插件代码后，悬浮窗右键 →「重新加载插件」即时生效。
+插件自己的设置保存后，对应分区会自动重建（无需手动重载全部插件）。
 
 ## 配置说明
 
@@ -93,8 +123,8 @@ Windows: `%APPDATA%\usage-widget\config.json`）：
 {
   "window": { "width": 300, "opacity": 0.92, "always_on_top": true, "position": [] },
   "plugins": {
-    "enabled": ["clock", "opencode_usage"],
-    "order": ["clock", "opencode_usage"],
+    "enabled": ["clock", "opencode_usage", "commandcode", "system_monitor"],
+    "order": ["clock", "opencode_usage", "commandcode", "system_monitor"],
     "settings": {}
   }
 }
@@ -135,7 +165,10 @@ usage-widget/
 │   └── base_widgets.py     # 通用控件 TextRow / BarGauge
 ├── plugins/
 │   ├── base.py             # Plugin 基类（插件 API）
-│   └── clock/              # 示例插件：时钟
+│   ├── clock/              # 示例插件：时钟
+│   ├── opencode_usage/     # opencode 用量监控（滚动/每周/每月 + 本月费用）
+│   ├── commandcode/        # commandcode 用量监控（5小时/每周/每月 + credits）
+│   └── system_monitor/     # 系统监控（CPU/内存/磁盘 I/O/GPU/网络/开机）
 └── tests/                  # pytest 冒烟测试
 ```
 
