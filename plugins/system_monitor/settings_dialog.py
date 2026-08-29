@@ -2,6 +2,7 @@
 import logging
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QDropEvent
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -16,6 +17,47 @@ from .plugin import ALL_ITEMS
 log = logging.getLogger("system_monitor.settings")
 
 _NAME_MAP = dict(ALL_ITEMS)
+
+
+class DragList(QListWidget):
+    """修复 Qt6 InternalMove 拖拽重排的 off-by-one bug。
+
+    Qt6 的 InternalMove 在 drop 到某 item 上方时，dropEvent 里
+    index.row() 是拖拽前的行号，takeItem 后行号偏移，导致目标项
+    被覆盖消失。这里在 dropEvent 里手动计算正确的插入位置。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._dragging_row: int | None = None
+
+    def startDrag(self, actions):
+        # 记录拖拽起始行，供 dropEvent 修正偏移
+        row = self.currentRow()
+        self._dragging_row = row if row >= 0 else None
+        super().startDrag(actions)
+        self._dragging_row = None
+
+    def dropEvent(self, event: QDropEvent):
+        # 需要目标行：drop 指示器指向的行
+        target = self.indexAt(event.position().toPoint())
+        target_row = target.row() if target.isValid() else self.count() - 1
+        src_row = self._dragging_row
+        if src_row is None:
+            # 兜底：没记录到就交给默认实现
+            super().dropEvent(event)
+            return
+        if target_row < 0:
+            target_row = self.count() - 1
+        # 把源 item 取出来，插入到目标行（跳过自身）
+        item = self.takeItem(src_row)
+        insert_row = target_row
+        if src_row < insert_row:
+            insert_row -= 1  # takeItem 后行号前移
+        self.insertItem(insert_row, item)
+        self.setCurrentRow(insert_row)
+        event.acceptProposedAction()
+        event.accept()
 
 
 class SettingsDialog(QDialog):
@@ -37,7 +79,7 @@ class SettingsDialog(QDialog):
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #9aa3b5; font-size: 11px;")
 
-        self._list = QListWidget()
+        self._list = DragList()
         self._list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
         self._list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         self._list.setDefaultDropAction(Qt.DropAction.MoveAction)
