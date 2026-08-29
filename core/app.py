@@ -22,7 +22,8 @@ def setup_logging(verbose: bool = False) -> None:
 def create_app(config: Config) -> FloatingWindow:
     QCoreApplication.setApplicationName("usage-widget")
     app = QApplication(sys.argv[:1])
-    app.setQuitOnLastWindowClosed(True)
+    # 分离的插件窗口独立存活：关闭主窗口不能连带退出应用
+    app.setQuitOnLastWindowClosed(False)
 
     manager = PluginManager(config)
     manager.load_all()
