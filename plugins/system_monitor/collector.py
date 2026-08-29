@@ -296,17 +296,8 @@ def _net_counters() -> tuple[int, int]:
 
         iphlp = ctypes.windll.iphlpapi
         down = up = 0
-        # 只统计真实物理网卡：虚拟/回环/隧道接口会让速率虚高
-        # （VMware/ZeroTier/WAN Miniport 等计数器高速增长）。
-        # 判据（启发式，跨厂商通用）：
-        #   1. 链路速率 > 0（虚拟隧道接口多为 0）
-        #   2. 非回环（Type != 24）
-        #   3. Description 不含常见虚拟接口标记
-        VIRTUAL_MARKERS = (
-            "loopback", "vmware", "virtual", "zerotier", "wan miniport",
-            "teredo", "6to4", "ip-https", "iphttps", "bluetooth", "kernel debug",
-            "wifi direct", "pppoe", "pptp", "sstp", "ikev2", "l2tp",
-        )
+        # 统计全部接口合计（物理 + 虚拟，如 ZeroTier/VMware），
+        # 唯一排除回环接口（本地流量无意义）。
         idx = 1
         while True:
             row = MIB_IF_ROW2()
@@ -318,23 +309,16 @@ def _net_counters() -> tuple[int, int]:
                 break
             if row.OperStatus != 1:  # 只统计 Up 的接口
                 continue
-            if row.Type == 24:  # IF_TYPE_SOFTWARE_LOOPBACK
-                continue
-            if row.TransmitLinkSpeed <= 0 and row.ReceiveLinkSpeed <= 0:
-                continue  # 无链路速率：虚拟隧道/未连接
-            desc = (row.Description or "").lower()
-            if any(m in desc for m in VIRTUAL_MARKERS):
+            if row.Type == 24:  # IF_TYPE_SOFTWARE_LOOPBACK：回环排除
                 continue
             down += row.InOctets
             up += row.OutOctets
         return down, up
-    # Linux：只统计物理网卡。虚拟接口（docker0/veth/br-/virbr-/tun/tap/
-    # wg/lo 等）没有 /sys/class/net/<if>/device 目录（不对应 PCI/USB
-    # 设备），物理网卡一定有。这与 Windows 侧过滤虚拟接口的目的一致。
+    # Linux：全部接口合计（物理 + 虚拟），唯一排除回环 lo。
     down = up = 0
     for f in Path("/sys/class/net").iterdir():
-        if not (f / "device").exists():
-            continue  # 虚拟接口
+        if f.name == "lo":
+            continue
         try:
             d = int((f / "statistics" / "rx_bytes").read_text().strip())
             u = int((f / "statistics" / "tx_bytes").read_text().strip())
