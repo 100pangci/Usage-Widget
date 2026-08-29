@@ -1,16 +1,19 @@
-"""系统监控插件：CPU/内存/磁盘/网络实时曲线 + 开机时长。
+"""系统监控插件：CPU/内存/磁盘/GPU/网络实时曲线 + 开机时长。
 
 纯标准库实现（collector.py），不依赖第三方包——发行版插件目录
 可独立运行。Windows 用 ctypes 调系统 API，Linux 读 /proc。
 
-UI：CPU/内存/磁盘用滚动历史曲线（QPainter 自绘），网络用迷你
-双向曲线（下行/上行），开机用精致的电池式信息卡。
+设置（右键 → 插件设置）：
+- 指标顺序：上下拖动调整
+- 显隐：每项勾选框，隐藏项不显示
 """
+import json
 import logging
 from collections import deque
+from pathlib import Path
 
-from PySide6.QtCore import QPointF, Qt, QTimer
-from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QPainter, QPainterPath
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -40,6 +43,28 @@ RED = "#e06c5a"
 TEXT = "#dfe3ea"
 
 _HISTORY = 90  # 曲线保留 90 个采样点（90 秒）
+
+# 指标 key 顺序（默认显示顺序，设置里可改）
+ALL_ITEMS = [
+    ("cpu", "CPU"),
+    ("gpu", "GPU"),
+    ("mem", "内存"),
+    ("disk", "磁盘"),
+    ("net", "网络"),
+    ("uptime", "开机"),
+]
+
+DEFAULT_ORDER = [key for key, _ in ALL_ITEMS]
+
+COLORS = {
+    "cpu": "#4f8cff",
+    "mem": "#e5b94d",
+    "disk": "#7cc76b",
+    "gpu": "#c67cff",
+}
+
+# 合法指标 key（设置持久化校验用）
+_KNOWN_KEYS = {key for key, _ in ALL_ITEMS}
 
 
 def percent_color(percent: int) -> str:
@@ -214,6 +239,10 @@ class SystemMonitorPlugin(Plugin):
 
     def __init__(self, context=None):
         super().__init__(context)
+        self.settings = {
+            "order": list(DEFAULT_ORDER),
+            "hidden": [],
+        }
         self._sparks: dict[str, SparkLine] = {}
         self._pct_labels: dict[str, QLabel] = {}
         self._mem_labels: dict[str, QLabel] = {}
@@ -223,9 +252,53 @@ class SystemMonitorPlugin(Plugin):
         self._uptime_label: QLabel | None = None
         self._net = NetSampler()
 
+    # ---- 设置持久化 ----
+
+    @property
+    def settings_path(self) -> Path:
+        return self.data_dir / "settings.json"
+
+    def load_settings(self) -> None:
+        """读取设置；默认顺序 + 空 hidden，缺项补齐。"""
+        self.settings = {
+            "order": list(DEFAULT_ORDER),
+            "hidden": [],
+        }
+        if self.settings_path.is_file():
+            try:
+                saved = json.loads(self.settings_path.read_text(encoding="utf-8"))
+                order = saved.get("order")
+                if isinstance(order, list) and order:
+                    # 只保留已知 key，缺失的补到末尾
+                    known = [k for k in order if k in _KNOWN_KEYS]
+                    for k in DEFAULT_ORDER:
+                        if k not in known:
+                            known.append(k)
+                    self.settings["order"] = known
+                hidden = saved.get("hidden")
+                if isinstance(hidden, list):
+                    self.settings["hidden"] = [k for k in hidden if k in _KNOWN_KEYS]
+            except (json.JSONDecodeError, OSError):
+                log.warning("settings.json 解析失败，使用默认值")
+
+    def save_settings(self) -> None:
+        try:
+            self.settings_path.parent.mkdir(parents=True, exist_ok=True)
+            self.settings_path.write_text(
+                json.dumps(self.settings, ensure_ascii=False, indent=2),
+                encoding="utf-8")
+        except OSError:
+            log.exception("保存设置失败")
+
+    def visible_items(self) -> list[str]:
+        """按设置顺序返回可见的指标 key（hidden 里的跳过）。"""
+        hidden = set(self.settings.get("hidden") or [])
+        return [k for k in self.settings.get("order") or DEFAULT_ORDER if k not in hidden]
+
     # ---- UI ----
 
     def create_widget(self, parent) -> QWidget:
+        self.load_settings()
         widget = QWidget(parent)
         lay = QVBoxLayout(widget)
         lay.setContentsMargins(12, 4, 12, 8)
@@ -250,84 +323,83 @@ class SystemMonitorPlugin(Plugin):
             self._sparks[key] = spark
             self._pct_labels[key] = pct
 
-        make_gauge("cpu", "CPU", "#4f8cff")
-        make_gauge("mem", "内存", "#e5b94d")
-        make_gauge("disk", "磁盘", "#7cc76b")
+        def make_net() -> None:
+            net_head = QWidget()
+            net_head_lay = QHBoxLayout(net_head)
+            net_head_lay.setContentsMargins(0, 0, 0, 0)
+            net_head_lay.setSpacing(6)
+            net_label = QLabel("网络")
+            net_label.setStyleSheet(f"font-size: 12px; color: {DIM};")
+            net_head_lay.addWidget(net_label)
+            net_head_lay.addStretch(1)
+            down_lbl = QLabel("↓--")
+            down_lbl.setStyleSheet(f"font-size: 11px; color: {TEXT};")
+            up_lbl = QLabel("↑--")
+            up_lbl.setStyleSheet(f"font-size: 11px; color: {TEXT};")
+            net_head_lay.addWidget(down_lbl)
+            net_head_lay.addWidget(up_lbl)
+            lay.addWidget(net_head)
+            self._net_labels["down"] = down_lbl
+            self._net_labels["up"] = up_lbl
 
-        # ---- GPU：自动枚举，每块一行曲线 ----
-        from .collector import gpu_names
+            net_spark = NetSpark()
+            lay.addWidget(net_spark)
+            self._net_spark = net_spark
+
+        def make_uptime() -> None:
+            uptime_box = QFrame()
+            uptime_box.setStyleSheet(
+                "background: rgba(255,255,255,12); border-radius: 6px;")
+            uptime_lay = QHBoxLayout(uptime_box)
+            uptime_lay.setContentsMargins(8, 4, 8, 4)
+            uptime_lay.setSpacing(6)
+            up_label = QLabel("开机")
+            up_label.setStyleSheet(f"font-size: 11px; color: {DIM};")
+            uptime_lay.addWidget(up_label)
+            uptime_lay.addStretch(1)
+            self._uptime_label = QLabel("--")
+            self._uptime_label.setStyleSheet(
+                f"font-size: 12px; font-weight: 600; color: {TEXT};")
+            uptime_lay.addWidget(self._uptime_label)
+            lay.addWidget(uptime_box)
+
+        # GPU 分区构建（自动枚举，每块一行曲线）
         gpu_list = gpu_names()
-        if gpu_list:
-            gpu_sep = QFrame()
-            gpu_sep.setFrameShape(QFrame.Shape.HLine)
-            gpu_sep.setStyleSheet("color: rgba(255,255,255,26);")
-            lay.addWidget(gpu_sep)
-        for i, gname in enumerate(gpu_list):
-            name = QLabel(gname)
-            name.setStyleSheet(f"font-size: 11px; color: {DIM};")
-            name.setToolTip(gname)
-            pct = QLabel("--")
-            pct.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {DIM};")
-            mem_lbl = QLabel("")
-            mem_lbl.setStyleSheet(f"font-size: 10px; color: {DIM};")
-            head = QWidget()
-            head_lay = QHBoxLayout(head)
-            head_lay.setContentsMargins(0, 0, 0, 0)
-            head_lay.setSpacing(6)
-            head_lay.addWidget(name)
-            head_lay.addStretch(1)
-            head_lay.addWidget(pct)
-            head_lay.addWidget(mem_lbl)
-            lay.addWidget(head)
 
-            spark = SparkLine("#c67cff")  # GPU 紫色
-            lay.addWidget(spark)
-            self._gpu_sparks.append((f"gpu{i}", spark, pct, mem_lbl))
+        def make_gpu() -> None:
+            for i, gname in enumerate(gpu_list):
+                name = QLabel(gname)
+                name.setStyleSheet(f"font-size: 11px; color: {DIM};")
+                name.setToolTip(gname)
+                pct = QLabel("--")
+                pct.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {DIM};")
+                mem_lbl = QLabel("")
+                mem_lbl.setStyleSheet(f"font-size: 10px; color: {DIM};")
+                head = QWidget()
+                head_lay = QHBoxLayout(head)
+                head_lay.setContentsMargins(0, 0, 0, 0)
+                head_lay.setSpacing(6)
+                head_lay.addWidget(name)
+                head_lay.addStretch(1)
+                head_lay.addWidget(pct)
+                head_lay.addWidget(mem_lbl)
+                lay.addWidget(head)
 
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.HLine)
-        line.setStyleSheet("color: rgba(255,255,255,26);")
-        lay.addWidget(line)
+                spark = SparkLine(COLORS["gpu"])
+                lay.addWidget(spark)
+                self._gpu_sparks.append((f"gpu{i}", spark, pct, mem_lbl))
 
-        # 网络：迷你双曲线 + 上下行速率
-        net_head = QWidget()
-        net_head_lay = QHBoxLayout(net_head)
-        net_head_lay.setContentsMargins(0, 0, 0, 0)
-        net_head_lay.setSpacing(6)
-        net_label = QLabel("网络")
-        net_label.setStyleSheet(f"font-size: 12px; color: {DIM};")
-        net_head_lay.addWidget(net_label)
-        net_head_lay.addStretch(1)
-        down_lbl = QLabel("↓--")
-        down_lbl.setStyleSheet(f"font-size: 11px; color: {TEXT};")
-        up_lbl = QLabel("↑--")
-        up_lbl.setStyleSheet(f"font-size: 11px; color: {TEXT};")
-        net_head_lay.addWidget(down_lbl)
-        net_head_lay.addWidget(up_lbl)
-        lay.addWidget(net_head)
-        self._net_labels["down"] = down_lbl
-        self._net_labels["up"] = up_lbl
-
-        net_spark = NetSpark()
-        lay.addWidget(net_spark)
-        self._net_spark = net_spark
-
-        # 开机：小卡片式
-        uptime_box = QFrame()
-        uptime_box.setStyleSheet(
-            "background: rgba(255,255,255,12); border-radius: 6px;")
-        uptime_lay = QHBoxLayout(uptime_box)
-        uptime_lay.setContentsMargins(8, 4, 8, 4)
-        uptime_lay.setSpacing(6)
-        up_label = QLabel("开机")
-        up_label.setStyleSheet(f"font-size: 11px; color: {DIM};")
-        uptime_lay.addWidget(up_label)
-        uptime_lay.addStretch(1)
-        self._uptime_label = QLabel("--")
-        self._uptime_label.setStyleSheet(
-            f"font-size: 12px; font-weight: 600; color: {TEXT};")
-        uptime_lay.addWidget(self._uptime_label)
-        lay.addWidget(uptime_box)
+        for key in self.visible_items():
+            if key == "gpu":
+                if gpu_list:
+                    make_gpu()
+            elif key in COLORS:
+                label = dict(ALL_ITEMS)[key]
+                make_gauge(key, label, COLORS[key])
+            elif key == "net":
+                make_net()
+            elif key == "uptime":
+                make_uptime()
 
         widget.setLayout(lay)
         return widget
@@ -335,52 +407,55 @@ class SystemMonitorPlugin(Plugin):
     # ---- 刷新 ----
 
     def tick(self) -> None:
-        if not self._sparks:
+        if not self._sparks and not self._net_spark and not self._gpu_sparks:
             return
 
-        cpu = cpu_percent()
-        self._sparks["cpu"].add(cpu)
-        self._pct_labels["cpu"].setText(f"{cpu}%")
-        self._pct_labels["cpu"].setStyleSheet(
-            f"font-size: 13px; font-weight: 700; color: {percent_color(cpu)};")
+        if "cpu" in self._sparks:
+            cpu = cpu_percent()
+            self._sparks["cpu"].add(cpu)
+            self._pct_labels["cpu"].setText(f"{cpu}%")
+            self._pct_labels["cpu"].setStyleSheet(
+                f"font-size: 13px; font-weight: 700; color: {percent_color(cpu)};")
 
-        mem = mem_percent()
-        self._sparks["mem"].add(mem)
-        self._pct_labels["mem"].setText(f"{mem}%")
-        self._pct_labels["mem"].setStyleSheet(
-            f"font-size: 13px; font-weight: 700; color: {percent_color(mem)};")
+        if "mem" in self._sparks:
+            mem = mem_percent()
+            self._sparks["mem"].add(mem)
+            self._pct_labels["mem"].setText(f"{mem}%")
+            self._pct_labels["mem"].setStyleSheet(
+                f"font-size: 13px; font-weight: 700; color: {percent_color(mem)};")
 
-        disk = disk_io_percent()
-        self._sparks["disk"].add(disk)
-        self._pct_labels["disk"].setText(f"{disk}%")
-        self._pct_labels["disk"].setStyleSheet(
-            f"font-size: 13px; font-weight: 700; color: {percent_color(disk)};")
+        if "disk" in self._sparks:
+            disk = disk_io_percent()
+            self._sparks["disk"].add(disk)
+            self._pct_labels["disk"].setText(f"{disk}%")
+            self._pct_labels["disk"].setStyleSheet(
+                f"font-size: 13px; font-weight: 700; color: {percent_color(disk)};")
 
         # GPU：多卡自动更新
-        from .collector import gpu_stats
-        gpu_data = gpu_stats()
-        for idx, (key, spark, pct_lbl, mem_lbl) in enumerate(self._gpu_sparks):
-            if idx < len(gpu_data):
-                d = gpu_data[idx]
-                util = d["util"]
-                spark.add(util)
-                pct_lbl.setText(f"{util}%")
-                pct_lbl.setStyleSheet(
-                    f"font-size: 12px; font-weight: 700; color: {percent_color(util)};")
-                if d["mem_total_mb"] > 0:
-                    mem_lbl.setText(
-                        f"{_fmt_mb(d['mem_used_mb'])}/{_fmt_mb(d['mem_total_mb'])}")
-                else:
-                    mem_lbl.setText("")
+        if self._gpu_sparks:
+            gpu_data = gpu_stats()
+            for idx, (key, spark, pct_lbl, mem_lbl) in enumerate(self._gpu_sparks):
+                if idx < len(gpu_data):
+                    d = gpu_data[idx]
+                    util = d["util"]
+                    spark.add(util)
+                    pct_lbl.setText(f"{util}%")
+                    pct_lbl.setStyleSheet(
+                        f"font-size: 12px; font-weight: 700; color: {percent_color(util)};")
+                    if d["mem_total_mb"] > 0:
+                        mem_lbl.setText(
+                            f"{_fmt_mb(d['mem_used_mb'])}/{_fmt_mb(d['mem_total_mb'])}")
+                    else:
+                        mem_lbl.setText("")
 
-        down, up = self._net.sample()
         if self._net_spark is not None:
+            down, up = self._net.sample()
             self._net_spark.add(down, up)
-        self._net_labels["down"].setText(f"↓{_fmt_speed(down)}")
-        self._net_labels["up"].setText(f"↑{_fmt_speed(up)}")
+            self._net_labels["down"].setText(f"↓{_fmt_speed(down)}")
+            self._net_labels["up"].setText(f"↑{_fmt_speed(up)}")
 
-        hours = uptime_hours()
         if self._uptime_label is not None:
+            hours = uptime_hours()
             self._uptime_label.setText(_fmt_uptime(hours))
 
     def on_stop(self) -> None:
@@ -391,6 +466,11 @@ class SystemMonitorPlugin(Plugin):
         self._net_labels = {}
         self._uptime_label = None
         self._net.reset()
+
+    def settings_dialog(self, parent=None):
+        from .settings_dialog import SettingsDialog
+
+        return SettingsDialog(self, parent)
 
 
 def _fmt_mb(mb: int) -> str:

@@ -99,6 +99,7 @@ def test_plugin_tick_updates_labels():
     plugin = SystemMonitorPlugin()
     widget = plugin.create_widget(None)
     assert len(plugin._sparks) == 3
+    assert len(plugin._gpu_sparks) == gpu_count()
     assert plugin._net_spark is not None
     assert plugin._uptime_label is not None
     plugin.tick()
@@ -116,3 +117,42 @@ def test_plugin_tick_updates_labels():
     assert plugin._sparks == {}
     assert plugin._net_spark is None
     widget.deleteLater()
+
+
+def test_plugin_settings_order_and_hidden():
+    """设置顺序/显隐生效：默认顺序、隐藏项、重排。"""
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    import tempfile
+    from plugins.system_monitor.plugin import SystemMonitorPlugin
+
+    with tempfile.TemporaryDirectory() as d:
+        plugin = SystemMonitorPlugin({"data_dir": d})
+        # 默认顺序
+        plugin.load_settings()
+        assert plugin.settings["order"] == ["cpu", "gpu", "mem", "disk", "net", "uptime"]
+        assert plugin.settings["hidden"] == []
+
+        # 自定义顺序 + 隐藏磁盘
+        plugin.settings["order"] = ["net", "cpu", "mem", "uptime", "disk", "gpu"]
+        plugin.settings["hidden"] = ["disk"]
+        plugin.save_settings()
+
+        plugin2 = SystemMonitorPlugin({"data_dir": d})
+        plugin2.load_settings()
+        assert plugin2.settings["order"] == ["net", "cpu", "mem", "uptime", "disk", "gpu"]
+        assert plugin2.settings["hidden"] == ["disk"]
+        # 可见项 = 顺序里去掉隐藏
+        assert plugin2.visible_items() == ["net", "cpu", "mem", "uptime", "gpu"]
+
+        # 重建 UI：隐藏项不出现
+        w = plugin2.create_widget(None)
+        assert "disk" not in plugin2._sparks
+        assert "cpu" in plugin2._sparks
+        assert plugin2._net_spark is not None
+        assert plugin2._uptime_label is not None
+        w.deleteLater()
