@@ -110,5 +110,11 @@ class SectionsContainer(QWidget):
     def clear(self) -> None:
         for section in self._sections:
             self._lay.removeWidget(section)
+            section.hide()
+            section.setParent(None)
             section.deleteLater()
         self._sections.clear()
+        # removeWidget + setParent(None) 后旧 section 立即脱离布局，
+        # 不再占用位置；deleteLater 只是延迟销毁对象本体，不影响布局。
+        # 之前用 processEvents() 会中途跑旧 _apply_stats 等信号，反而
+        # 干扰重建后的布局计算。

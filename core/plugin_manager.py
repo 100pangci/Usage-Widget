@@ -73,11 +73,17 @@ def import_plugin(plugins_dir: Path, plugin_id: str):
 
 
 def _register_parent_pkg(plugins_dir: Path) -> None:
-    if _PKG in sys.modules:
+    if _PKG not in sys.modules:
+        parent = types.ModuleType(_PKG)
+        parent.__path__ = [str(plugins_dir)]
+        sys.modules[_PKG] = parent
         return
-    parent = types.ModuleType(_PKG)
-    parent.__path__ = [str(plugins_dir)]
-    sys.modules[_PKG] = parent
+    # 多次调用（不同 plugins_dir，如测试/动态加载）时更新路径，
+    # 否则父包 __path__ 停留在第一次的目录，新目录里的插件导入失败
+    cur = getattr(sys.modules[_PKG], "__path__", None)
+    path = str(plugins_dir)
+    if cur is None or path not in cur:
+        sys.modules[_PKG].__path__ = [path] + (list(cur) if cur else [])
 
 
 def instantiate_plugin(module, plugin_id: str, context: dict) -> Plugin:
@@ -116,14 +122,54 @@ class PluginManager:
     # ---- 加载 ----
 
     def load_all(self) -> list[str]:
-        """按配置 enabled/order 加载插件。返回成功加载的 id 列表。"""
+        """按配置 enabled/order 加载插件。返回成功加载的 id 列表。
+
+        对老配置/新插件鲁棒：
+        - 配置里没写的新插件（如升级后新增/用户新放进去的）自动补到
+          enabled/order 末尾并持久化，老用户不用改配置就能用上新插件
+        - 用户显式禁用的插件尊重配置：在 enabled 里删掉即禁用，不会被
+          自动补全拉回来（order 记录“曾经见过”，见过但不在 enabled 的
+          插件视为用户主动禁用）
+        - enabled 为空（显式禁用所有）时保持加载零个插件
+        """
         self.stop_all()
         self.plugins.clear()
 
         conf = self.config.get("plugins", default={}) or {}
-        enabled = conf.get("enabled") or []
-        order = conf.get("order") or enabled
+        enabled = list(conf.get("enabled") or [])
+        order = list(conf.get("order") or enabled)
         known = set(discover_plugin_ids(self.plugins_dir))
+
+        # 配置与磁盘现状不一致时落盘修正（新插件自动启用/失效插件剔除），
+        # 否则 config.json 一直留着旧列表，之后每次启动都重复「自动补全」。
+        if enabled:
+            # 从未见过（不在 order 里）的插件自动启用；在 order 里但被
+            # 用户从 enabled 删掉的保持禁用
+            missing = [pid for pid in sorted(known) if pid not in order]
+            if missing:
+                enabled += missing
+                order = order + [pid for pid in missing if pid not in order]
+                self.config.set("plugins", "enabled", value=enabled)
+                self.config.set("plugins", "order", value=order)
+                self.config.save()
+                log.info("自动启用新发现的插件: %s", ", ".join(missing))
+        elif not conf.get("order"):
+            # 完全没有 enabled/order 配置：全部已发现插件
+            enabled = sorted(known)
+            order = enabled
+            self.config.set("plugins", "enabled", value=enabled)
+            self.config.set("plugins", "order", value=order)
+            self.config.save()
+
+        # 已不存在的插件从配置里剔除，避免每次启动重复扫描失败
+        stale = [pid for pid in (enabled + order) if pid not in known]
+        if stale:
+            enabled = [pid for pid in enabled if pid not in stale]
+            order = [pid for pid in order if pid not in stale]
+            self.config.set("plugins", "enabled", value=enabled)
+            self.config.set("plugins", "order", value=order)
+            self.config.save()
+            log.info("移除已不存在的插件: %s", ", ".join(stale))
 
         selected = []
         for pid in order:

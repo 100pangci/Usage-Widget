@@ -1,5 +1,29 @@
 # Changelog
 
+## [v1.0.4] - 2026-08-29
+
+### 新增
+
+- **插件自动发现与启用**：新插件（升级后新增或用户自己放进 `plugin/`
+  目录的）会自动补到 `plugins.enabled/order` 末尾并持久化，老用户不用
+  改配置就能用上新插件；用户主动从 `enabled` 里删掉的插件不会被自动
+  拉回来（`order` 记录「曾经见过」，见过但不在 `enabled` 视为显式禁用）；
+  已不存在的插件会自动从配置里清理
+
+### 修复
+
+- **Windows 发行版 commandcode 插件不加载**：commandcode 插件自 v1.0.1
+  发布以来一直没进默认配置——`DEFAULT_CONFIG` 的 `plugins.enabled/order`
+  只有 `clock` 和 `opencode_usage`，老用户升级后新插件被静默跳过。现在
+  默认启用 `commandcode`（老用户也无需手动改配置，自动发现逻辑会补上）
+- **点击「重新加载插件」后文字上下被裁切（Linux 复现）**：两个叠加的
+  时序问题——`clear()` 里旧分区 `removeWidget` 后仍占用布局位置直到
+  `deleteLater` 真正销毁，新分区插进来导致布局混乱；且 `populate_sections`
+  末尾同步调用 `_fit_to_content()`，新分区刚 `addWidget` 时 `sizeHint` 还
+  没计算完成（Qt 布局异步），按旧/空值 resize 导致窗口高度不足、文字被
+  上下边框裁切。现在 `clear()` 立即 `setParent(None)` 脱离布局，尺寸收缩
+  统一改为延迟一帧等布局完成后再执行
+
 ## [v1.0.3] - 2026-08-27
 
 ### 修复

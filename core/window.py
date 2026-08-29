@@ -170,7 +170,10 @@ class FloatingWindow(QWidget):
             if pid in hidden:
                 self._container.set_section_visible(pid, False)
         self._rebuild_menu()
-        self._fit_to_content()
+        # 不在这里同步 _fit_to_content：新 section 刚插入，sizeHint 还没
+        # 计算完成（Qt 布局异步），此时 resize 会拿到旧/空值导致文字裁切。
+        # 由 layout_changed → QTimer.singleShot(0) 延迟一帧自动收缩。
+        QTimer.singleShot(0, lambda: self._fit_to_content(shrink=True))
 
     def _fit_to_content(self, shrink: bool = False) -> None:
         """无边框窗口无法手动缩放，按分区内容自适应尺寸。
