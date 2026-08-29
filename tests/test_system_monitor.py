@@ -56,8 +56,9 @@ def test_fmt_speed():
 
 def test_fmt_uptime():
     assert _fmt_uptime(5) == "5小时"
-    assert _fmt_uptime(30) == "1天6小时"
-    assert _fmt_uptime(50) == "2天2小时"
+    assert _fmt_uptime(30.5) == "1天 6小时"
+    assert _fmt_uptime(50) == "2天 2小时"
+    assert _fmt_uptime(0.5) == "30分"
 
 
 # ---- UI 刷新 ----
@@ -73,10 +74,19 @@ def test_plugin_tick_updates_labels():
 
     plugin = SystemMonitorPlugin()
     widget = plugin.create_widget(None)
-    assert len(plugin._labels) == 5
+    assert len(plugin._sparks) == 3
+    assert plugin._net_spark is not None
+    assert plugin._uptime_label is not None
     plugin.tick()
-    for key, label in plugin._labels.items():
-        assert label.text() != "--", f"{key} 未刷新"
+    for key, pct in plugin._pct_labels.items():
+        assert pct.text() != "--", f"{key} 未刷新"
+    assert "↓" in plugin._net_labels["down"].text()
+    assert "↑" in plugin._net_labels["up"].text()
+    assert plugin._uptime_label.text() != "--"
+    # 曲线有数据点
+    assert len(plugin._sparks["cpu"]._data) == 1
+    assert len(plugin._net_spark._down) == 1
     plugin.on_stop()
-    assert plugin._labels == {}
+    assert plugin._sparks == {}
+    assert plugin._net_spark is None
     widget.deleteLater()
