@@ -8,7 +8,7 @@ import tempfile
 
 from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QGuiApplication
-from PySide6.QtWidgets import QApplication, QLayout, QMenu, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QLayout, QMenu, QVBoxLayout, QWidget
 
 from plugins.base import Plugin
 from ui.sections import SectionsContainer
@@ -296,8 +296,23 @@ class FloatingWindow(QWidget):
 
     def _open_plugin_settings(self, plugin) -> None:
         dialog = plugin.settings_dialog(self)
-        if dialog is not None:
-            dialog.exec()
+        if dialog is not None and dialog.exec() == QDialog.DialogCode.Accepted:
+            # 设置保存成功：只重建该插件自己的分区，其他插件不受影响
+            self._rebuild_plugin_section(plugin)
+
+    def _rebuild_plugin_section(self, plugin) -> None:
+        """重建单个插件的分区（保留折叠状态，不重载其他插件）。"""
+        try:
+            widget = plugin.create_widget(self._container)
+        except Exception:
+            log.exception("插件 %s 的 create_widget 失败", plugin.id)
+            return
+        if not self._container.replace_section(plugin.id, widget):
+            # 分区不存在（可能被隐藏或未加载）：按新增处理
+            self._section_titles.append((plugin.id, plugin.name or plugin.id))
+            self._container.add_section(plugin.id, plugin.name or plugin.id, widget)
+            self._rebuild_menu()
+        QTimer.singleShot(0, lambda: self._fit_to_content(shrink=True))
 
     def _reload_plugins(self) -> None:
         log.info("重新加载插件")

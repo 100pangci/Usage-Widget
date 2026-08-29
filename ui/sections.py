@@ -55,6 +55,16 @@ class Section(QFrame):
         self._toggle.setText("▸" if self._collapsed else "▾")
         self.collapsed_changed.emit()
 
+    def set_content(self, new_content: QWidget) -> None:
+        """替换内容 widget（保留折叠状态与标题栏）。"""
+        lay = self.layout()
+        old = self._content
+        lay.replaceWidget(old, new_content)
+        old.deleteLater()
+        self._content = new_content
+        # 保持折叠状态
+        new_content.setVisible(not self._collapsed)
+
 
 class SectionsContainer(QWidget):
     """所有插件分区的垂直容器。
@@ -106,6 +116,14 @@ class SectionsContainer(QWidget):
             if section.key == key:
                 section.setVisible(visible)
                 break
+
+    def replace_section(self, key: str, content: QWidget) -> bool:
+        """替换单个分区的内容 widget（其他分区不受影响）。"""
+        for section in self._sections:
+            if section.key == key:
+                section.set_content(content)
+                return True
+        return False
 
     def clear(self) -> None:
         for section in self._sections:
