@@ -226,3 +226,33 @@ def test_reload_no_clipped_labels():
         # 窗口高度与 reload 前一致（内容相同则尺寸应不变）
         assert win.height() > 0
 
+
+def test_theme_switching():
+    """主题切换：core.theme 状态 + 插件取色函数跟随主题。"""
+    from core.theme import DARK, LIGHT, color, get_theme, is_dark, set_theme
+
+    set_theme(DARK)
+    assert is_dark()
+    assert get_theme() == DARK
+    assert color("dim") == "#9aa3b5"
+    assert color("text") == "#dfe3ea"
+
+    set_theme(LIGHT)
+    assert not is_dark()
+    assert get_theme() == LIGHT
+    assert color("dim") == "#5a6270"
+    assert color("text") == "#1f2430"
+
+    # 非法值回退深色
+    set_theme("weird")
+    assert is_dark()
+
+    # 插件取色跟随主题
+    from plugins.system_monitor import plugin as sm
+
+    set_theme(DARK)
+    assert sm.DIM() == "#9aa3b5"
+    set_theme(LIGHT)
+    assert sm.DIM() == "#5a6270"
+    set_theme(DARK)
+

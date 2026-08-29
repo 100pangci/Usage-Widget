@@ -10,12 +10,13 @@ from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QGuiApplication
 from PySide6.QtWidgets import QApplication, QDialog, QLayout, QMenu, QVBoxLayout, QWidget
 
+import core.theme as theme
 from plugins.base import Plugin
 from ui.sections import SectionsContainer
 
 log = logging.getLogger("usage-widget.window")
 
-PANEL_STYLE = """
+PANEL_STYLE_DARK = """
 #panel QLabel { color: #dfe3ea; }
 #panel QToolButton { color: #dfe3ea; border: none; background: transparent; padding: 2px 6px; border-radius: 4px; }
 #panel QToolButton:hover { background: rgba(255, 255, 255, 18); }
@@ -25,6 +26,18 @@ PANEL_STYLE = """
     border-radius: 4px;
 }
 #panel QProgressBar::chunk { background: #4f8cff; border-radius: 4px; }
+"""
+
+PANEL_STYLE_LIGHT = """
+#panel QLabel { color: #1f2430; }
+#panel QToolButton { color: #1f2430; border: none; background: transparent; padding: 2px 6px; border-radius: 4px; }
+#panel QToolButton:hover { background: rgba(0, 0, 0, 12); }
+#panel QProgressBar {
+    background: rgba(0, 0, 0, 24);
+    border: none;
+    border-radius: 4px;
+}
+#panel QProgressBar::chunk { background: #2f6fd6; border-radius: 4px; }
 """
 
 _KDE_ENV_MARKERS = ("KDE_FULL_SESSION", "KDE_SESSION_VERSION")
@@ -127,12 +140,10 @@ class FloatingWindow(QWidget):
         # 收缩窗口，否则 sizeHint 还是折叠前的旧值
         self._container.layout_changed.connect(
             lambda: QTimer.singleShot(0, lambda: self._fit_to_content(shrink=True)))
-        alpha = self.config.get("window", "opacity", default=0.92)
-        self._container.set_panel_colors(
-            QColor(40, 45, 56, int(alpha * 255)),
-            QColor(255, 255, 255, 26),
-        )
-        self._container.setStyleSheet(PANEL_STYLE)
+        # 主题：初始化时应用（config 里的 theme + opacity）
+        saved_theme = self.config.get("window", "theme", default=theme.DARK)
+        saved_alpha = self.config.get("window", "opacity", default=0.92)
+        self.apply_theme(saved_theme, saved_alpha)
 
         fill = QVBoxLayout(self)
         fill.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
@@ -240,6 +251,10 @@ class FloatingWindow(QWidget):
 
         self._settings_menu = self._menu.addMenu("插件设置")
 
+        sys_settings_action = QAction("系统设置…", self)
+        sys_settings_action.triggered.connect(self._open_system_settings)
+        self._menu.addAction(sys_settings_action)
+
         reload_action = QAction("重新加载插件", self)
         reload_action.triggered.connect(self._reload_plugins)
         self._menu.addAction(reload_action)
@@ -313,6 +328,32 @@ class FloatingWindow(QWidget):
             self._container.add_section(plugin.id, plugin.name or plugin.id, widget)
             self._rebuild_menu()
         QTimer.singleShot(0, lambda: self._fit_to_content(shrink=True))
+
+    # ---- 系统设置（主题/透明度） ----
+
+    def apply_theme(self, theme_name: str, alpha: float) -> None:
+        """应用主题与背景透明度。
+
+        theme_name: "dark" / "light"。设置全局主题、面板背景色、
+        边框与 QSS；插件分区通过 theme.colors() 读取各自颜色。
+        """
+        theme.set_theme(theme_name)
+        if theme.is_dark():
+            bg = QColor(40, 45, 56, int(alpha * 255))
+            border = QColor(255, 255, 255, 26)
+            panel_style = PANEL_STYLE_DARK
+        else:
+            bg = QColor(242, 244, 248, int(alpha * 255))
+            border = QColor(0, 0, 0, 40)
+            panel_style = PANEL_STYLE_LIGHT
+        self._container.set_panel_colors(bg, border)
+        self._container.setStyleSheet(panel_style)
+
+    def _open_system_settings(self) -> None:
+        from core.system_settings_dialog import SystemSettingsDialog
+
+        dialog = SystemSettingsDialog(self.config, self, self)
+        dialog.exec()
 
     def _reload_plugins(self) -> None:
         log.info("重新加载插件")

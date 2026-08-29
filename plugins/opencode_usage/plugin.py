@@ -40,11 +40,53 @@ DEFAULT_SETTINGS = {
 }
 
 ACCENT = "#4f8cff"
-DIM = "#9aa3b5"
-TEXT = "#dfe3ea"
-GREEN = "#7cc76b"
-AMBER = "#e5b94d"
-RED = "#e06c5a"
+
+# ---- 主题颜色（深色/浅色两套，跟随 core.theme）----
+
+_COLORS_DARK = {
+    "dim": "#9aa3b5",
+    "text": "#dfe3ea",
+    "green": "#7cc76b",
+    "amber": "#e5b94d",
+    "red": "#e06c5a",
+}
+
+_COLORS_LIGHT = {
+    "dim": "#5a6270",
+    "text": "#1f2430",
+    "green": "#3f9e4f",
+    "amber": "#b8860b",
+    "red": "#d64545",
+}
+
+
+def _theme_colors() -> dict:
+    try:
+        from core.theme import is_dark
+
+        return _COLORS_DARK if is_dark() else _COLORS_LIGHT
+    except ImportError:
+        return _COLORS_DARK  # 独立运行（无框架）时用深色
+
+
+def DIM() -> str:
+    return _theme_colors()["dim"]
+
+
+def TEXT() -> str:
+    return _theme_colors()["text"]
+
+
+def GREEN() -> str:
+    return _theme_colors()["green"]
+
+
+def AMBER() -> str:
+    return _theme_colors()["amber"]
+
+
+def RED() -> str:
+    return _theme_colors()["red"]
 
 # 仍在跑的取数线程驻留表：插件停止/重载时不在 UI 线程 wait()（那会
 # 卡死界面），而是把引用移交到这里直到线程自然结束，避免「QThread
@@ -66,10 +108,10 @@ def _release_worker(worker) -> None:
 def percent_color(percent: int) -> str:
     """使用率颜色：<50% 绿 / <80% 黄 / ≥80% 红。"""
     if percent >= 80:
-        return RED
+        return RED()
     if percent >= 50:
-        return AMBER
-    return GREEN
+        return AMBER()
+    return GREEN()
 
 
 class UsageBar(QWidget):
@@ -391,9 +433,9 @@ class OpencodeUsagePlugin(Plugin):
 
         def make_usage(key: str, label: str) -> None:
             name = QLabel(label)
-            name.setStyleSheet(f"font-size: 12px; color: {DIM};")
+            name.setStyleSheet(f"font-size: 12px; color: {DIM()};")
             pct = QLabel("--")
-            pct.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {DIM};")
+            pct.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {DIM()};")
             head = QWidget()
             head_lay = QHBoxLayout(head)
             head_lay.setContentsMargins(0, 0, 0, 0)
@@ -404,7 +446,7 @@ class OpencodeUsagePlugin(Plugin):
 
             bar = UsageBar()
             reset = QLabel("")
-            reset.setStyleSheet(f"font-size: 11px; color: {DIM};")
+            reset.setStyleSheet(f"font-size: 11px; color: {DIM()};")
             foot = QWidget()
             foot_lay = QHBoxLayout(foot)
             foot_lay.setContentsMargins(0, 0, 0, 0)
@@ -429,7 +471,7 @@ class OpencodeUsagePlugin(Plugin):
 
         month_caption = QLabel("本月蹬了：")
         month_caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        month_caption.setStyleSheet(f"font-size: 11px; color: {DIM}; letter-spacing: 1px;")
+        month_caption.setStyleSheet(f"font-size: 11px; color: {DIM()}; letter-spacing: 1px;")
         lay.addWidget(month_caption)
 
         month_value = QLabel("--")
@@ -439,7 +481,7 @@ class OpencodeUsagePlugin(Plugin):
         self._labels["month_value"] = month_value
 
         status = QLabel("初始化…")
-        status.setStyleSheet(f"font-size: 11px; color: {DIM};")
+        status.setStyleSheet(f"font-size: 11px; color: {DIM()};")
         status.setWordWrap(True)
         lay.addWidget(status)
         self._labels["status"] = status

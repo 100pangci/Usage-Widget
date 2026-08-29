@@ -73,6 +73,31 @@ class MyPlugin(Plugin):
 
 通用控件见 `ui/base_widgets.py`：`TextRow`（标签+数值行）、`BarGauge`（带标签进度条）。
 
+### 主题适配（必须提供两套颜色）
+
+插件里的文字/进度条颜色必须同时提供**深色/浅色**两套，跟随框架主题
+（右键 → 系统设置 → 主题）自动切换。约定：定义 `_COLORS_DARK` /
+`_COLORS_LIGHT` 两个字典，再提供取色函数（内部读 `core.theme`），
+独立运行（无框架）时回退深色：
+
+```python
+_COLORS_DARK = {"dim": "#9aa3b5", "text": "#dfe3ea"}
+_COLORS_LIGHT = {"dim": "#5a6270", "text": "#1f2430"}
+
+def _theme_colors() -> dict:
+    try:
+        from core.theme import is_dark
+        return _COLORS_DARK if is_dark() else _COLORS_LIGHT
+    except ImportError:
+        return _COLORS_DARK
+
+def DIM() -> str:   return _theme_colors()["dim"]
+def TEXT() -> str:  return _theme_colors()["text"]
+```
+
+UI 里用 `{DIM()}` / `{TEXT()}` 代替硬编码颜色。语义色（绿/黄/红）
+两种主题下也要提供对应变体。参考 `plugins/system_monitor/plugin.py`。
+
 ### 插件设置对话框
 
 实现 `settings_dialog(parent)` 返回 `QDialog`，右键菜单「插件设置」会弹出；
@@ -121,7 +146,13 @@ Windows: `%APPDATA%\usage-widget\config.json`）：
 
 ```json
 {
-  "window": { "width": 300, "opacity": 0.92, "always_on_top": true, "position": [] },
+  "window": {
+    "width": 300,
+    "opacity": 0.92,
+    "theme": "dark",
+    "always_on_top": true,
+    "position": []
+  },
   "plugins": {
     "enabled": ["clock", "opencode_usage", "commandcode", "system_monitor"],
     "order": ["clock", "opencode_usage", "commandcode", "system_monitor"],
@@ -130,12 +161,15 @@ Windows: `%APPDATA%\usage-widget\config.json`）：
 }
 ```
 
+`window.theme`: `"dark"` / `"light"`；`window.opacity`: 0.3~1.0 背景透明度。
+两者可在右键 →「系统设置」里调整并即时生效。
+
 ## 交互
 
 | 操作 | 行为 |
 | --- | --- |
 | 左键拖动 | 移动窗口（Wayland 下走系统移动） |
-| 右键 | 分区显隐、置顶开关、重新加载插件、打开配置目录、退出 |
+| 右键 | 分区显隐、置顶开关、插件设置、系统设置（主题/透明度）、重新加载插件、打开配置目录、退出 |
 | Esc | 关闭 |
 
 ## 平台说明
@@ -156,10 +190,12 @@ Windows: `%APPDATA%\usage-widget\config.json`）：
 usage-widget/
 ├── main.py                 # 入口
 ├── core/
-│   ├── app.py              # QApplication 装配与启动顺序
-│   ├── config.py           # 配置读写（深合并默认值）
-│   ├── plugin_manager.py   # 插件扫描/加载/启停/重载
-│   └── window.py           # 主悬浮窗（无边框/透明/拖动/右键菜单）
+│   ├── app.py                 # QApplication 装配与启动顺序
+│   ├── config.py              # 配置读写（深合并默认值）
+│   ├── theme.py               # 全局主题（深色/浅色）与颜色表
+│   ├── plugin_manager.py      # 插件扫描/加载/启停/重载
+│   ├── system_settings_dialog.py  # 系统设置（主题/透明度）
+│   └── window.py              # 主悬浮窗（无边框/透明/拖动/右键菜单）
 ├── ui/
 │   ├── sections.py         # 分区容器（垂直堆叠）
 │   └── base_widgets.py     # 通用控件 TextRow / BarGauge

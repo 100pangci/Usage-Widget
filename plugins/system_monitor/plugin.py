@@ -36,11 +36,56 @@ from .collector import (
 
 log = logging.getLogger("system_monitor.plugin")
 
-DIM = "#9aa3b5"
-GREEN = "#7cc76b"
-AMBER = "#e5b94d"
-RED = "#e06c5a"
-TEXT = "#dfe3ea"
+# ---- 主题颜色（深色/浅色两套，跟随 core.theme）----
+
+_COLORS_DARK = {
+    "dim": "#9aa3b5",
+    "text": "#dfe3ea",
+    "green": "#7cc76b",
+    "amber": "#e5b94d",
+    "red": "#e06c5a",
+}
+
+_COLORS_LIGHT = {
+    "dim": "#5a6270",
+    "text": "#1f2430",
+    "green": "#3f9e4f",
+    "amber": "#b8860b",
+    "red": "#d64545",
+}
+
+
+def _theme_colors() -> dict:
+    try:
+        from core.theme import is_dark
+
+        return _COLORS_DARK if is_dark() else _COLORS_LIGHT
+    except ImportError:
+        return _COLORS_DARK  # 独立运行（无框架）时用深色
+
+
+def DIM() -> str:
+    return _theme_colors()["dim"]
+
+
+def TEXT() -> str:
+    return _theme_colors()["text"]
+
+
+def GREEN() -> str:
+    return _theme_colors()["green"]
+
+
+def AMBER() -> str:
+    return _theme_colors()["amber"]
+
+
+def RED() -> str:
+    return _theme_colors()["red"]
+
+# 曲线/进度条颜色（两种主题下保持辨识度）
+ACCENT = "#4f8cff"
+GPU_COLOR = "#c67cff"
 
 _HISTORY = 90  # 曲线保留 90 个采样点（90 秒）
 
@@ -70,10 +115,10 @@ _KNOWN_KEYS = {key for key, _ in ALL_ITEMS}
 def percent_color(percent: int) -> str:
     """使用率颜色：<50% 绿 / <80% 黄 / ≥80% 红。"""
     if percent >= 80:
-        return RED
+        return RED()
     if percent >= 50:
-        return AMBER
-    return GREEN
+        return AMBER()
+    return GREEN()
 
 
 def _hex_color(hex_str: str, alpha: int = 255) -> QColor:
@@ -221,7 +266,7 @@ class NetSpark(QWidget):
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawPath(line)
 
-        draw_side(self._up, GREEN, -1)     # 上行（绿色，上半）
+        draw_side(self._up, GREEN(), -1)     # 上行（绿色，上半）
         draw_side(self._down, "#4f8cff", 1)  # 下行（蓝色，下半）
 
         # 中间分隔线
@@ -306,9 +351,9 @@ class SystemMonitorPlugin(Plugin):
 
         def make_gauge(key: str, label: str, color: str) -> None:
             name = QLabel(label)
-            name.setStyleSheet(f"font-size: 12px; color: {DIM};")
+            name.setStyleSheet(f"font-size: 12px; color: {DIM()};")
             pct = QLabel("--")
-            pct.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {DIM};")
+            pct.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {DIM()};")
             head = QWidget()
             head_lay = QHBoxLayout(head)
             head_lay.setContentsMargins(0, 0, 0, 0)
@@ -329,13 +374,13 @@ class SystemMonitorPlugin(Plugin):
             net_head_lay.setContentsMargins(0, 0, 0, 0)
             net_head_lay.setSpacing(6)
             net_label = QLabel("网络")
-            net_label.setStyleSheet(f"font-size: 12px; color: {DIM};")
+            net_label.setStyleSheet(f"font-size: 12px; color: {DIM()};")
             net_head_lay.addWidget(net_label)
             net_head_lay.addStretch(1)
             down_lbl = QLabel("↓--")
-            down_lbl.setStyleSheet(f"font-size: 11px; color: {TEXT};")
+            down_lbl.setStyleSheet(f"font-size: 11px; color: {TEXT()};")
             up_lbl = QLabel("↑--")
-            up_lbl.setStyleSheet(f"font-size: 11px; color: {TEXT};")
+            up_lbl.setStyleSheet(f"font-size: 11px; color: {TEXT()};")
             net_head_lay.addWidget(down_lbl)
             net_head_lay.addWidget(up_lbl)
             lay.addWidget(net_head)
@@ -354,12 +399,12 @@ class SystemMonitorPlugin(Plugin):
             uptime_lay.setContentsMargins(8, 4, 8, 4)
             uptime_lay.setSpacing(6)
             up_label = QLabel("开机")
-            up_label.setStyleSheet(f"font-size: 11px; color: {DIM};")
+            up_label.setStyleSheet(f"font-size: 11px; color: {DIM()};")
             uptime_lay.addWidget(up_label)
             uptime_lay.addStretch(1)
             self._uptime_label = QLabel("--")
             self._uptime_label.setStyleSheet(
-                f"font-size: 12px; font-weight: 600; color: {TEXT};")
+                f"font-size: 12px; font-weight: 600; color: {TEXT()};")
             uptime_lay.addWidget(self._uptime_label)
             lay.addWidget(uptime_box)
 
@@ -369,12 +414,12 @@ class SystemMonitorPlugin(Plugin):
         def make_gpu() -> None:
             for i, gname in enumerate(gpu_list):
                 name = QLabel(gname)
-                name.setStyleSheet(f"font-size: 11px; color: {DIM};")
+                name.setStyleSheet(f"font-size: 11px; color: {DIM()};")
                 name.setToolTip(gname)
                 pct = QLabel("--")
-                pct.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {DIM};")
+                pct.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {DIM()};")
                 mem_lbl = QLabel("")
-                mem_lbl.setStyleSheet(f"font-size: 10px; color: {DIM};")
+                mem_lbl.setStyleSheet(f"font-size: 10px; color: {DIM()};")
                 head = QWidget()
                 head_lay = QHBoxLayout(head)
                 head_lay.setContentsMargins(0, 0, 0, 0)
@@ -385,7 +430,7 @@ class SystemMonitorPlugin(Plugin):
                 head_lay.addWidget(mem_lbl)
                 lay.addWidget(head)
 
-                spark = SparkLine(COLORS["gpu"])
+                spark = SparkLine(GPU_COLOR)
                 lay.addWidget(spark)
                 self._gpu_sparks.append((f"gpu{i}", spark, pct, mem_lbl))
 
