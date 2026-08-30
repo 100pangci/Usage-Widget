@@ -196,7 +196,11 @@ class PluginManager:
     # ---- 启停 ----
 
     def start_all(self) -> None:
+        hidden = set(self.config.get("window", "hidden_sections", default=[]) or [])
         for pid, plugin in self.plugins.items():
+            if pid in hidden:
+                # 「显示分区」菜单隐藏的插件不启动（不 tick 后台监控）
+                continue
             plugin.start()
             log.debug("插件已启动: %s", pid)
 

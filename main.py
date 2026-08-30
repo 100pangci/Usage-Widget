@@ -24,7 +24,9 @@ def main() -> int:
     setup_logging(args.verbose)
     config = Config(args.config)
     window = create_app(config)
-    window.show()
+    # 主窗口没有插件（如拆分后重启）时不显示空窗口
+    if window.plugin_ids:
+        window.show()
 
     app = QApplication.instance()
 

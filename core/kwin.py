@@ -64,7 +64,7 @@ def _run_qdbus(args: list[str], timeout: float = 5.0) -> tuple[int, str]:
     return proc.returncode, proc.stdout.strip()
 
 
-def unload_keepabove_script(script_name: str) -> None:
+def unload_keepabove_script(script_name: str = "usage-widget-keepabove") -> None:
     _run_qdbus([
         "org.kde.KWin", "/Scripting",
         "org.kde.kwin.Scripting.unloadScript",
@@ -72,7 +72,7 @@ def unload_keepabove_script(script_name: str) -> None:
     ])
 
 
-def set_keepabove(on: bool, script_name: str) -> bool:
+def set_keepabove(on: bool, script_name: str = "usage-widget-keepabove") -> bool:
     """通过 KWin 脚本设置窗口置顶（脚本名按窗口区分）。"""
     if not is_kde_session():
         return False

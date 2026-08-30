@@ -1,5 +1,53 @@
 # Changelog
 
+## [Unreleased]
+
+### 变更
+
+- **系统监控插件架构重构（v0.4.0）**：单文件采集器拆分为 `collector/`
+  包（cpu/memory/disk/net/gpu/system 按指标域分模块），新增
+  `SystemPlugin` 基类（注册式采样 + 节流 + 环形历史）与 `widgets.py`
+  （自绘曲线组件）；采集改用 psutil，刷新间隔 1s → 2s
+- GPU 采集不再阻塞 UI 线程：显卡名枚举改读注册表（PowerShell 仅作
+  兜底），利用率采样移入后台线程并缓存上次结果；NVML 利用率改用
+  正确的 `nvmlUtilization` 结构体（旧实现传两个 c_uint 指针属未定义
+  行为）；NVML 显卡名获取失败时占位，保持名字与句柄数量一致
+- 主窗口拆分后自动隐藏（空窗口无意义），合并回主窗口时恢复显示；
+  子窗口的置顶状态持久化并在启动时恢复
+
+### 修复
+
+- **关闭主窗口必崩溃**：`closeEvent` 调用 `unload_keepabove_script()`
+  漏传脚本名参数触发 TypeError（实测进程直接崩溃）；切换置顶、
+  `always_on_top=false` 时的启动、KDE 启动路径同理——全部补上按窗口
+  区分的脚本名（kwin 函数另加默认脚本名兜底），并修正启动时置顶
+  状态应用反了的问题
+- **子窗口「拆分」丢失第一个插件**：拆分只把第 2 个起的插件拆成独立窗口，
+  第 1 个还挂在被关闭的源窗口里——随 `deleteLater` 一起销毁，实例从所有
+  窗口与 `config.windows` 中永久消失，且 timer 变僵尸（每秒 tick 已删除的
+  控件抛 RuntimeError）；现在与主窗口行为一致，全部插件各自拆成独立窗口
+- **Linux 磁盘 I/O 读数约虚高一倍**：刷新间隔 1s→2s 后忙时增量仍按 1 秒
+  窗口归一化；改用真实采样间隔归一，并优先用 psutil `busy_time`
+  （/proc/diskstats io_ticks 口径，并发读写不双计），无该字段的平台回退
+  `read_time + write_time`
+- Windows PDH 磁盘计数器不可用（如未启用 diskperf）时磁盘 I/O 恒为 0 且
+  无任何提示：现在告警一次（提示管理员运行 `diskperf -Y`）并不再每 tick
+  重试打开查询
+- `always_on_top=false` 的启动路径会 `show()` 主窗口：全部插件分离后
+  重启（空主窗口）也会弹出空窗口；启动时只清置顶 flag 不显示
+- 主窗口右键菜单出现两个「插件设置」入口：基类的单项版只打开第一个
+  插件的对话框、易误导，只保留给子窗口；主窗口用自己的逐插件子菜单
+- 「拆分」与重启恢复产生的独立窗口标题显示 w2/w3，与「分离」产生的
+  窗口（插件名）不一致；统一用插件名
+- 曲线历史注释「90 点 = 90 秒」过期：tick 已改 2s，实际约 180 秒
+- **重新显示分区后插件不工作**：`show_section` 只重启了 tick 定时器、
+  没走 `plugin.start()`，opencode/commandcode 这类在 `on_start` 里启动
+  倒计时/加载设置的插件重新显示后不会恢复；现在恢复走完整启动流程
+- 系统监控只显示「开机」分区时开机时长不更新（`tick` 提前返回漏判了
+  uptime 标签）
+- `pyproject.toml` 缺 `py-modules = ["main"]`，pip 安装后
+  `usage-widget` 命令入口解析不到 main 模块
+
 ## [v1.1.0] - 2026-08-29
 
 ### 新增

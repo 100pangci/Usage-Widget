@@ -24,8 +24,8 @@ python3 -m venv .venv
 .venv/bin/python main.py -c /path/to/config.json   # 指定配置
 ```
 
-> 依赖只声明了 PySide6（见 `pyproject.toml`）；也可直接
-> `.venv/bin/pip install pyside6` 后运行。
+> 依赖声明为 PySide6 + psutil（见 `pyproject.toml`）；也可直接
+> `.venv/bin/pip install pyside6 psutil` 后运行。
 
 ## 插件开发
 
@@ -72,6 +72,9 @@ class MyPlugin(Plugin):
 缺省则取模块内第一个 `Plugin` 子类。
 
 通用控件见 `ui/base_widgets.py`：`TextRow`（标签+数值行）、`BarGauge`（带标签进度条）。
+系统监控插件自身拆分参考：`plugins/system_monitor/base.py`（采集注册 +
+节流 + 环形历史的基类，借鉴 Glances 插件架构）、`collector/`（按指标域
+拆分的 psutil 采集器）、`widgets.py`（QPainter 自绘曲线控件）。
 
 ### 主题适配（必须提供两套颜色）
 
@@ -205,6 +208,11 @@ usage-widget/
 │   ├── opencode_usage/     # opencode 用量监控（滚动/每周/每月 + 本月费用）
 │   ├── commandcode/        # commandcode 用量监控（5小时/每周/每月 + credits）
 │   └── system_monitor/     # 系统监控（CPU/内存/磁盘 I/O/GPU/网络/开机）
+│       ├── base.py             # 采集编排基类（注册式采集 + 节流 + 环形历史）
+│       ├── collector/          # 采集层：cpu/memory/disk/net/gpu/system（psutil）
+│       ├── widgets.py          # SparkLine / NetSpark 自绘曲线
+│       ├── plugin.py           # 插件主体（UI 构建 + tick）
+│       └── settings_dialog.py  # 设置对话框（顺序 + 显隐）
 └── tests/                  # pytest 冒烟测试
 ```
 
@@ -233,6 +241,10 @@ GitHub Actions（`.github/workflows/build.yml`）：
 
 插件数据（cookie 等）保存在 `~/.usage-widget/plugin/<id>/`
 （Windows: `C:\Users\xxx\.usage-widget\...`，权限 600）。
+
+> 打包注意：系统监控插件运行时 `import psutil`，psutil 是编译扩展，
+> 必须打进 exe（构建脚本已带 `--hidden-import psutil`），
+> 插件目录里的是纯 Python 源码。
 
 ## 测试
 

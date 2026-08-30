@@ -23,7 +23,7 @@ class WindowManager:
         self.manager = plugin_manager  # PluginManager（发现/加载插件）
         self.windows: dict[str, object] = {}  # window_id -> PluginWindow
         self._main_window = None
-        self._window_factory = window_factory  # (window_id, wc) -> PluginWindow
+        self._window_factory = window_factory  # (window_id, wc, title) -> PluginWindow
         self._refresh_callback = None  # 窗口内容变化时刷新所有窗口菜单
 
     # ---- 窗口创建 ----
@@ -94,6 +94,10 @@ class WindowManager:
                 if inst is not None:
                     win.remove_plugin(pid)
                     self.attach_plugin(MAIN_ID, inst)
+            # 插件回到主窗口时恢复显示（主窗口可能因拆分被隐藏）
+            main = self.windows.get(MAIN_ID)
+            if main is not None and not main.isVisible():
+                main.show()
         win.deleteLater()
         self._notify_change()
         self.persist()
@@ -116,6 +120,11 @@ class WindowManager:
         for pid in list(self.windows[src_id].plugin_ids):
             self.move_plugin(src_id, dst_id, pid)
         self.close_window(src_id, merge_plugins=False)
+        # 合并回隐藏的主窗口时恢复显示
+        if dst_id == MAIN_ID:
+            main = self.windows.get(MAIN_ID)
+            if main is not None and not main.isVisible():
+                main.show()
         self._notify_change()
         self.persist()
 
@@ -129,14 +138,20 @@ class WindowManager:
         if not plugins:
             return
         if window_id == MAIN_ID:
-            # 主窗口：每个插件拆成独立窗口，主窗口保留（变空）
+            # 主窗口：每个插件拆成独立窗口，主窗口保留但隐藏（空窗口无意义）
             for plugin in plugins:
                 self.move_plugin(MAIN_ID, self._new_detached(plugin), plugin.id)
+            main = self.windows.get(MAIN_ID)
+            if main is not None:
+                main.hide()
             self._notify_change()
             self.persist()
         else:
-            # 子窗口：第一个插件留在本窗口，其余拆走，最后关闭空窗口
-            for plugin in plugins[1:]:
+            # 子窗口：每个插件拆成独立窗口（与主窗口行为一致），
+            # 最后关闭空窗口。注意必须全部拆走——留任何一个在
+            # close_window 的 deleteLater 里都会随窗口一起销毁，
+            # 实例从配置中丢失且 timer 变僵尸（每秒 tick 已删对象）
+            for plugin in plugins:
                 self.move_plugin(window_id, self._new_detached(plugin), plugin.id)
             self.close_window(window_id, merge_plugins=False)
             self._notify_change()
@@ -145,7 +160,7 @@ class WindowManager:
     def _new_detached(self, plugin) -> str:
         """创建新的独立窗口并挂载插件，返回 window_id。"""
         wid = self.next_window_id()
-        self._spawn_window(wid, {})
+        self._spawn_window(wid, {}, title=plugin.name or plugin.id)
         self.attach_plugin(wid, plugin)
         win = self.windows.get(wid)
         if win is not None:
@@ -156,6 +171,11 @@ class WindowManager:
 
     def restore(self) -> None:
         """按配置恢复全部窗口：windows.<id> = {plugins, pos, topmost}。"""
+        # 先清空所有窗口已挂载的插件（重载场景：旧实例需移除，
+        # 否则 add_plugin 幂等判断会保留旧实例引用）
+        for win in self.windows.values():
+            for pid in list(win.plugin_ids):
+                win.remove_plugin(pid)
         windows_cfg = self.config.get("windows", default={}) or {}
         main_plugins = windows_cfg.get(MAIN_ID, {}).get("plugins") or []
         # 1. 先恢复非 main 窗口（按配置顺序，插件顺序与配置一致）
@@ -168,7 +188,9 @@ class WindowManager:
                 if plugin is None:
                     continue
                 if wid not in self.windows:
-                    self._spawn_window(wid, wc)
+                    # 窗口标题用首个插件的名字（与「分离」产生的窗口一致）
+                    self._spawn_window(
+                        wid, wc, title=plugin.name or pid)
                 self.attach_plugin(wid, plugin)
                 detached_seen.add(pid)
         # 2. 主窗口：配置顺序 + 未配置的补末尾
@@ -187,13 +209,16 @@ class WindowManager:
             if pos and len(pos) == 2 and wid != MAIN_ID:
                 win.move(int(pos[0]), int(pos[1]))
             if wid != MAIN_ID:
+                # 窗口默认带置顶 flag，只需恢复持久化为 False 的
+                if wc.get("topmost") is False:
+                    win.apply_topmost(False)
                 win.show()
         self.persist()
 
-    def _spawn_window(self, window_id: str, wc: dict) -> None:
+    def _spawn_window(self, window_id: str, wc: dict, title: str | None = None) -> None:
         """按配置创建独立窗口（由 FloatingWindow 注入 factory）。"""
         if self._window_factory is not None:
-            win = self._window_factory(window_id, wc)
+            win = self._window_factory(window_id, wc, title)
             if win is not None:
                 self.windows[window_id] = win
                 return

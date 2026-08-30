@@ -7,11 +7,8 @@
 """
 import logging
 import os
-import shutil
 import subprocess
 import sys
-import tempfile
-from pathlib import Path
 
 from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QGuiApplication
@@ -37,8 +34,8 @@ class FloatingWindow(PluginWindow):
         super().__init__(MAIN_ID, config, "usage-widget", parent)
         self.manager = plugin_manager
 
-        def _factory(window_id, wc):
-            win = PluginWindow(window_id, self.config, window_id)
+        def _factory(window_id, wc, title=None):
+            win = PluginWindow(window_id, self.config, title or window_id)
             win.bind_manager(self.window_manager)
             win.closed.connect(self.window_manager.close_window)
             return win
@@ -55,9 +52,14 @@ class FloatingWindow(PluginWindow):
         self._refresh_all_merge_targets()
 
         if not self.config.get("window", "always_on_top", default=True):
-            self._toggle_topmost()
+            # 启动路径只清置顶 flag，不能走 _toggle_topmost——它会
+            # show()，把空主窗口（全部插件已分离）也弹出来
+            self.setWindowFlags(
+                self.windowFlags() & ~Qt.WindowType.WindowStaysOnTopHint)
         elif is_kde_session():
-            QTimer.singleShot(800, lambda: kwin_set_always_on_top(True))
+            QTimer.singleShot(
+                800, lambda: set_keepabove(
+                    True, f"usage-widget-{MAIN_ID}-keepabove"))
 
     def _on_window_layout_changed(self) -> None:
         """窗口/插件分配变化：刷新所有窗口的合并目标 + 主窗口菜单。"""
@@ -149,10 +151,10 @@ class FloatingWindow(PluginWindow):
         self._detach_menu.setEnabled(has_child or has_main_plugins)
 
     def _toggle_section(self, pid: str, visible: bool) -> None:
-        for section in self._container._sections:
-            if section.key == pid:
-                section.setVisible(visible)
-                break
+        if visible:
+            self.show_section(pid)
+        else:
+            self.hide_section(pid)
         hidden = list(self.config.get("window", "hidden_sections", default=[]) or [])
         if visible and pid in hidden:
             hidden.remove(pid)
@@ -168,8 +170,11 @@ class FloatingWindow(PluginWindow):
             self._rebuild_plugin_section(plugin)
 
     def _rebuild_plugin_section(self, plugin) -> None:
+        hidden = set(self.config.get("window", "hidden_sections", default=[]) or [])
         self.remove_plugin(plugin.id)
         self.add_plugin(plugin)
+        if plugin.id in hidden:
+            self.hide_section(plugin.id)
         self._refresh_main_menu()
 
     # ---- 分离插件到独立窗口 ----
@@ -259,7 +264,7 @@ class FloatingWindow(PluginWindow):
             self.move(pos)
         self.config.set("window", "always_on_top", value=bool(checked))
         self.config.save()
-        kwin_set_always_on_top(bool(checked))
+        set_keepabove(bool(checked), f"usage-widget-{self.window_id}-keepabove")
 
     def _apply_saved_position(self) -> None:
         pos = self.config.get("window", "position", default=[])
@@ -273,7 +278,7 @@ class FloatingWindow(PluginWindow):
         if not self._is_wayland():
             self.config.set("window", "position", value=[self.x(), self.y()])
             self.config.save()
-        _kwin_unload_script()
+        unload_keepabove_script(f"usage-widget-{self.window_id}-keepabove")
         # 退出时给后台线程 2.5s 收尾
         self.manager.stop_all(grace_ms=2500)
         # 还有独立窗口：主窗口隐藏，应用继续跑

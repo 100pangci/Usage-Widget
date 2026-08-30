@@ -13,6 +13,8 @@ from plugins.system_monitor.collector import (
     gpu_names,
     gpu_stats,
     mem_percent,
+    mem_stats,
+    net_counters,
     uptime_hours,
 )
 from plugins.system_monitor.plugin import _fmt_mb, _fmt_speed, _fmt_uptime
@@ -31,9 +33,55 @@ def test_mem_percent_range():
     assert 0 <= v <= 100
 
 
+def test_mem_stats_shape():
+    s = mem_stats()
+    assert s["total_mb"] > 0
+    assert s["available_mb"] >= 0
+    assert s["used_mb"] >= 0
+    assert 0 <= s["percent"] <= 100
+
+
 def test_disk_io_percent_range():
-    v = disk_io_percent()
-    assert 0 <= v <= 100
+    for _ in range(2):
+        v = disk_io_percent()
+        assert 0 <= v <= 100
+
+
+def test_io_delta_percent_normalizes_by_real_interval():
+    """忙时增量按真实采样间隔归一（回归：曾按 1s 窗口算，2s tick 虚高一倍）。"""
+    from plugins.system_monitor.collector.disk import _io_delta_percent
+
+    assert _io_delta_percent(1000, 2.0) == 50   # 2s tick 下半忙 → 50%
+    assert _io_delta_percent(1000, 1.0) == 100  # 1s 全忙 → 100%
+    assert _io_delta_percent(4000, 2.0) == 100  # 多盘并行封顶 100
+    assert _io_delta_percent(0, 2.0) == 0
+    assert _io_delta_percent(500, 0.0) == 0
+
+
+def test_disk_io_ticks_prefers_busy_time(monkeypatch):
+    """有 busy_time（io_ticks 口径，并发读写不双计）优先；无则回退。"""
+    from collections import namedtuple
+
+    from plugins.system_monitor.collector import disk as disk_mod
+
+    WithBusy = namedtuple("WithBusy", "read_time write_time busy_time")
+    NoBusy = namedtuple("NoBusy", "read_time write_time")
+
+    def fake_counters(perdisk=False):
+        assert perdisk
+        return {
+            "sda": WithBusy(read_time=100, write_time=200, busy_time=250),
+            "sdb": NoBusy(read_time=10, write_time=20),
+        }
+
+    monkeypatch.setattr(disk_mod.psutil, "disk_io_counters", fake_counters)
+    assert disk_mod._disk_io_ticks() == {"sda": 250, "sdb": 30}
+
+
+def test_net_counters_shape():
+    down, up = net_counters()
+    assert down >= 0
+    assert up >= 0
 
 
 def test_uptime_positive():
@@ -41,10 +89,18 @@ def test_uptime_positive():
 
 
 def test_gpu_api_returns_lists():
-    """GPU 采集 API：返回列表，多卡时每卡一项（无卡时为空列表）。"""
+    """GPU 采集 API：返回列表，多卡时每卡一项（无卡时为空列表）。
+
+    WMI 后端的利用率在后台线程刷新，首轮可能还没缓存，轮询等待。
+    """
     count = gpu_count()
     names = gpu_names()
     stats = gpu_stats()
+    for _ in range(20):
+        if len(stats) == count:
+            break
+        time.sleep(0.25)
+        stats = gpu_stats()
     assert isinstance(names, list)
     assert isinstance(stats, list)
     assert len(names) == count
@@ -96,27 +152,31 @@ def test_plugin_tick_updates_labels():
     app = QApplication.instance() or QApplication([])
     from plugins.system_monitor.plugin import SystemMonitorPlugin
 
-    plugin = SystemMonitorPlugin()
-    widget = plugin.create_widget(None)
-    assert len(plugin._sparks) == 3
-    assert len(plugin._gpu_sparks) == gpu_count()
-    assert plugin._net_spark is not None
-    assert plugin._uptime_label is not None
-    plugin.tick()
-    for key, pct in plugin._pct_labels.items():
-        assert pct.text() != "--", f"{key} 未刷新"
-    assert "↓" in plugin._net_labels["down"].text()
-    assert "↑" in plugin._net_labels["up"].text()
-    assert plugin._uptime_label.text() != "--"
-    # 曲线有数据点
-    assert len(plugin._sparks["cpu"]._data) == 1
-    assert len(plugin._net_spark._down) == 1
-    # GPU 分区数量与 gpu_count 一致（无卡时为 0）
-    assert len(plugin._gpu_sparks) == gpu_count()
-    plugin.on_stop()
-    assert plugin._sparks == {}
-    assert plugin._net_spark is None
-    widget.deleteLater()
+    # data_dir 指向临时目录，避免读到开发者本机的 settings.json
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        plugin = SystemMonitorPlugin({"data_dir": d})
+        widget = plugin.create_widget(None)
+        assert len(plugin._sparks) == 3
+        assert len(plugin._gpu_sparks) == gpu_count()
+        assert plugin._net_spark is not None
+        assert plugin._uptime_label is not None
+        plugin.tick()
+        for key, pct in plugin._pct_labels.items():
+            assert pct.text() != "--", f"{key} 未刷新"
+        assert "↓" in plugin._net_labels["down"].text()
+        assert "↑" in plugin._net_labels["up"].text()
+        assert plugin._uptime_label.text() != "--"
+        # 曲线有数据点
+        assert len(plugin._sparks["cpu"]._data) == 1
+        assert len(plugin._net_spark._down) == 1
+        # GPU 分区数量与 gpu_count 一致（无卡时为 0）
+        assert len(plugin._gpu_sparks) == gpu_count()
+        plugin.on_stop()
+        assert plugin._sparks == {}
+        assert plugin._net_spark is None
+        widget.deleteLater()
 
 
 def test_plugin_settings_order_and_hidden():

@@ -256,3 +256,58 @@ def test_theme_switching():
     assert sm.DIM() == "#4b525c"
     set_theme(DARK)
 
+
+def test_hidden_sections_restored_on_restart():
+    """「显示分区」菜单隐藏的分区，重启后保持隐藏且 tick 停止。
+
+    回归：v1.1.0 之前 restore() 无视 hidden_sections，重启后全部插件
+    被重新挂载并启动（「只开 clock 下次全开」的 bug）。
+    """
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication
+
+    from core.config import Config
+    from core.plugin_manager import PluginManager
+    from core.window import FloatingWindow
+
+    app = QApplication.instance() or QApplication([])
+    with tempfile.TemporaryDirectory() as d:
+        cfg = Config(os.path.join(d, "config.json"))
+        cfg.set("window", "hidden_sections",
+                value=["opencode_usage", "commandcode", "system_monitor"])
+        cfg.set("plugins", "enabled", value=["clock", "opencode_usage", "commandcode", "system_monitor"])
+        cfg.save()
+
+        mgr = PluginManager(cfg)
+        mgr.load_all()
+        win = FloatingWindow(cfg, mgr)
+        win.populate_sections()
+        mgr.start_all()
+        QTimer.singleShot(50, app.quit)
+        app.exec()
+
+        def visible_ids() -> list[str]:
+            return [s.key for s in win._container._sections if not s.isHidden()]
+
+        # 隐藏的分区不可见，clock 可见
+        assert visible_ids() == ["clock"], visible_ids()
+        # 隐藏分区的 timer 已停止（不跑监控）
+        for pid in ("opencode_usage", "commandcode", "system_monitor"):
+            plugin = win.get_plugin(pid)
+            assert plugin is not None
+            assert not plugin._timer.isActive(), f"{pid} timer 未停止"
+        # clock 的 timer 在跑
+        assert win.get_plugin("clock")._timer.isActive()
+
+        win._reload_plugins()
+        QTimer.singleShot(50, app.quit)
+        app.exec()
+        # 重载后隐藏状态依然保持
+        assert visible_ids() == ["clock"], visible_ids()
+        assert not win.get_plugin("opencode_usage")._timer.isActive()
+        assert win.get_plugin("clock")._timer.isActive()
+
+

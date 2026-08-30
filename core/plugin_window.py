@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QLayout, QMenu, QVBoxLayout, QWidget
 
 import core.theme as theme
 from core.kwin import is_kde_session, set_keepabove, unload_keepabove_script
+from core.window_manager import MAIN_ID
 from ui.sections import SectionsContainer
 
 log = logging.getLogger("usage-widget.plugin_window")
@@ -94,12 +95,17 @@ class PluginWindow(QWidget):
         self._plugins[pid] = plugin
         title = plugin.name or pid
         self._container.add_section(pid, title, widget)
-        # 迁移复用实例：确保 timer 在跑
-        try:
-            if not plugin._timer.isActive():
+        # 「显示分区」菜单隐藏的分区：挂载但不启动 tick（不跑后台监控）
+        hidden = set(self.config.get("window", "hidden_sections", default=[]) or [])
+        if pid in hidden:
+            self.hide_section(pid)
+        else:
+            # 迁移复用实例：确保 timer 在跑
+            try:
+                if not plugin._timer.isActive():
+                    plugin.start()
+            except AttributeError:
                 plugin.start()
-        except AttributeError:
-            plugin.start()
         QTimer.singleShot(0, self._fit_to_content)
 
     def remove_plugin(self, pid: str):
@@ -122,8 +128,47 @@ class PluginWindow(QWidget):
         QTimer.singleShot(0, self._fit_to_content)
         return plugin
 
+    def hide_section(self, pid: str) -> None:
+        """隐藏分区并停止插件 tick（「显示分区」菜单的「关」）。"""
+        for section in self._container._sections:
+            if section.key == pid:
+                section.setVisible(False)
+                break
+        plugin = self._plugins.get(pid)
+        if plugin is not None:
+            try:
+                plugin._timer.stop()
+            except AttributeError:
+                pass
+        QTimer.singleShot(0, self._fit_to_content)
+
+    def show_section(self, pid: str) -> None:
+        """显示分区并恢复插件运行（「显示分区」菜单的「开」）。
+
+        恢复走完整 start()（on_start + 定时器 + 首次 tick），否则
+        opencode/commandcode 这类在 on_start 里启动倒计时/加载设置的
+        插件重新显示后不会恢复工作。
+        """
+        for section in self._container._sections:
+            if section.key == pid:
+                section.setVisible(True)
+                break
+        plugin = self._plugins.get(pid)
+        if plugin is not None:
+            try:
+                if plugin._timer.isActive():
+                    plugin.tick()
+                else:
+                    plugin.start()
+            except AttributeError:
+                pass
+            except Exception:
+                log.exception("恢复插件 %s 失败", pid)
+        QTimer.singleShot(0, self._fit_to_content)
+
     def rebuild(self) -> None:
         """按当前 _plugins 顺序重建分区（实例不变，仅重建 UI 顺序）。"""
+        hidden = set(self.config.get("window", "hidden_sections", default=[]) or [])
         plugins = list(self._plugins.values())
         # 先卸载 UI（不 stop 实例，稍后重新挂载）
         for pid in list(self._plugins):
@@ -138,6 +183,8 @@ class PluginWindow(QWidget):
             self._plugins.pop(pid, None)
         for p in plugins:
             self.add_plugin(p)
+            if p.id in hidden:
+                self.hide_section(p.id)
         QTimer.singleShot(0, self._fit_to_content)
 
     # ---- 主题 ----
@@ -212,13 +259,61 @@ class PluginWindow(QWidget):
         topmost_action.toggled.connect(self._toggle_topmost)
         self._menu.addAction(topmost_action)
 
-        settings_action = QAction("插件设置…", self)
-        settings_action.triggered.connect(self._open_plugin_settings)
-        self._menu.addAction(settings_action)
+        # 子窗口：简化设置入口（打开第一个插件的对话框）。
+        # 主窗口不加——它有自己的「插件设置」子菜单（逐插件入口，
+        # 见 FloatingWindow._build_main_menu），重复且易误导
+        if self.window_id != MAIN_ID:
+            settings_action = QAction("插件设置…", self)
+            settings_action.triggered.connect(self._open_plugin_settings)
+            self._menu.addAction(settings_action)
+
+        # 子窗口补全局入口（系统设置/重载/配置目录/退出），委托主窗口；
+        # 主窗口（FloatingWindow）有自己的 _build_main_menu，不重复
+        if self.window_id != MAIN_ID:
+            self._menu.addSeparator()
+            sys_action = QAction("系统设置…", self)
+            sys_action.triggered.connect(self._open_main_dialog)
+            self._menu.addAction(sys_action)
+            reload_action = QAction("重新加载插件", self)
+            reload_action.triggered.connect(self._reload_plugins_via_main)
+            self._menu.addAction(reload_action)
+            cfg_action = QAction("打开配置目录", self)
+            cfg_action.triggered.connect(self._open_config_dir_via_main)
+            self._menu.addAction(cfg_action)
+            quit_action = QAction("退出", self)
+            quit_action.triggered.connect(self._quit_via_main)
+            self._menu.addAction(quit_action)
 
         close_action = QAction("关闭", self)
         close_action.triggered.connect(self._user_close)
         self._menu.addAction(close_action)
+
+    # ---- 委托主窗口的全局操作（子窗口菜单入口） ----
+
+    def _main_window(self):
+        if self._manager is None:
+            return None
+        return self._manager.windows.get(MAIN_ID)
+
+    def _open_main_dialog(self) -> None:
+        main = self._main_window()
+        if main is not None:
+            main._open_system_settings()
+
+    def _reload_plugins_via_main(self) -> None:
+        main = self._main_window()
+        if main is not None:
+            main._reload_plugins()
+
+    def _open_config_dir_via_main(self) -> None:
+        main = self._main_window()
+        if main is not None:
+            main._open_config_dir()
+
+    def _quit_via_main(self) -> None:
+        main = self._main_window()
+        if main is not None:
+            main.close()
 
     def _request_split(self) -> None:
         if self._manager is not None:
@@ -230,12 +325,15 @@ class PluginWindow(QWidget):
 
     def _rebuild_merge_menu(self) -> None:
         self._merge_menu.clear()
-        # 只列非空窗口（有插件的才可合并过去）
+        # 只列非空窗口；主窗口例外——空主窗口也可作为合并目标
+        # （合并回去会显示主窗口，恢复系统设置等入口）
         visible = []
         if self._manager is not None:
             for wid, name in self._targets:
                 win = self._manager.windows.get(wid)
-                if win is not None and win.plugin_ids:
+                if win is None:
+                    continue
+                if wid == MAIN_ID or win.plugin_ids:
                     visible.append((wid, name))
         else:
             visible = self._targets
@@ -253,10 +351,11 @@ class PluginWindow(QWidget):
     def contextMenuEvent(self, event):
         self._menu.exec(event.globalPos())
 
-    def _toggle_topmost(self, checked: bool) -> None:
+    def apply_topmost(self, on: bool) -> None:
+        """应用置顶状态（切 flag 不跳位 + KDE KWin 脚本），不触发持久化。"""
         pos = self.pos()
         flags = self.windowFlags()
-        if checked:
+        if on:
             flags |= Qt.WindowType.WindowStaysOnTopHint
         else:
             flags &= ~Qt.WindowType.WindowStaysOnTopHint
@@ -265,7 +364,10 @@ class PluginWindow(QWidget):
         if "wayland" not in QGuiApplication.platformName():
             self.move(pos)
         if is_kde_session():
-            set_keepabove(checked, f"usage-widget-{self.window_id}-keepabove")
+            set_keepabove(on, f"usage-widget-{self.window_id}-keepabove")
+
+    def _toggle_topmost(self, checked: bool) -> None:
+        self.apply_topmost(checked)
         if self._manager is not None:
             self._manager.persist()
 
@@ -289,7 +391,7 @@ class PluginWindow(QWidget):
         # 只有用户主动关闭（菜单「关闭」/点 X）才通知管理器回收插件；
         # 程序内部 deleteLater 触发的 close 不应触发（防止重启恢复时
         # 窗口被误判为「用户关闭」而把插件挪回主窗口）。
-        if (self._manager is not None and self.window_id != "main"
+        if (self._manager is not None and self.window_id != MAIN_ID
                 and (self._user_closing or event.spontaneous())):
             self.closed.emit(self.window_id)
         for pid in list(self._plugins):

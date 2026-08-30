@@ -39,6 +39,7 @@ EXTRA=()
     --hidden-import configparser \
     --hidden-import concurrent.futures \
     --hidden-import certifi \
+    --hidden-import psutil \
     --exclude-module pytest \
     "${EXTRA[@]}" \
     main.py

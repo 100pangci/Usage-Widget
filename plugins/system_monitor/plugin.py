@@ -1,7 +1,9 @@
 """系统监控插件：CPU/内存/磁盘/GPU/网络实时曲线 + 开机时长。
 
-纯标准库实现（collector.py），不依赖第三方包——发行版插件目录
-可独立运行。Windows 用 ctypes 调系统 API，Linux 读 /proc。
+架构（参考 Glances）：
+- 采集层 plugins/system_monitor/collector/：按指标域拆分，psutil 实现
+- 基类 plugins/system_monitor/base.py：注册式采集 + 节流 + 环形历史
+- UI：plugins/system_monitor/widgets.py 的自绘曲线 + 本文件的分区构建
 
 设置（右键 → 插件设置）：
 - 指标顺序：上下拖动调整
@@ -9,11 +11,8 @@
 """
 import json
 import logging
-from collections import deque
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, Qt
-from PySide6.QtGui import QColor, QPainter, QPainterPath
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -22,8 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from plugins.base import Plugin
-
+from .base import SystemPlugin, throttled
 from .collector import (
     NetSampler,
     cpu_percent,
@@ -33,63 +31,17 @@ from .collector import (
     mem_percent,
     uptime_hours,
 )
+from .widgets import (
+    COLORS,
+    GPU_COLOR,
+    NetSpark,
+    SparkLine,
+    percent_color,
+    DIM,
+    TEXT,
+)
 
 log = logging.getLogger("system_monitor.plugin")
-
-# ---- 主题颜色：跟随 core.theme（唯一颜色源）----
-
-# 无框架独立运行（如直接跑插件）时的回退颜色
-_FALLBACK_COLORS = {
-    "dim": "#9aa3b5",
-    "text": "#dfe3ea",
-    "green": "#7cc76b",
-    "amber": "#e5b94d",
-    "red": "#e06c5a",
-}
-
-
-def _theme_colors() -> dict:
-    try:
-        from core.theme import color
-
-        return {k: color(k) for k in ("dim", "text", "green", "amber", "red")}
-    except ImportError:
-        return _FALLBACK_COLORS
-
-
-def _is_dark_theme() -> bool:
-    try:
-        from core.theme import is_dark
-
-        return is_dark()
-    except ImportError:
-        return True
-
-
-def DIM() -> str:
-    return _theme_colors()["dim"]
-
-
-def TEXT() -> str:
-    return _theme_colors()["text"]
-
-
-def GREEN() -> str:
-    return _theme_colors()["green"]
-
-
-def AMBER() -> str:
-    return _theme_colors()["amber"]
-
-
-def RED() -> str:
-    return _theme_colors()["red"]
-
-# 曲线/进度条颜色（两种主题下保持辨识度）
-ACCENT = "#4f8cff"
-GPU_COLOR = "#c67cff"
-
-_HISTORY = 90  # 曲线保留 90 个采样点（90 秒）
 
 # 指标 key 顺序（默认显示顺序，设置里可改）
 ALL_ITEMS = [
@@ -103,187 +55,50 @@ ALL_ITEMS = [
 
 DEFAULT_ORDER = [key for key, _ in ALL_ITEMS]
 
-COLORS = {
-    "cpu": "#4f8cff",
-    "mem": "#e5b94d",
-    "disk": "#7cc76b",
-    "gpu": "#c67cff",
-}
-
 # 合法指标 key（设置持久化校验用）
 _KNOWN_KEYS = {key for key, _ in ALL_ITEMS}
 
 
-def percent_color(percent: int) -> str:
-    """使用率颜色：<50% 绿 / <80% 黄 / ≥80% 红。"""
-    if percent >= 80:
-        return RED()
-    if percent >= 50:
-        return AMBER()
-    return GREEN()
+def _fmt_mb(mb: int) -> str:
+    """MB → 自适应单位（GB 显示小数，MB 显示整数）。"""
+    if mb >= 1024:
+        gb = mb / 1024
+        return f"{gb:.1f}G" if gb < 10 else f"{gb:.0f}G"
+    return f"{mb}M"
 
 
-def _hex_color(hex_str: str, alpha: int = 255) -> QColor:
-    c = QColor(hex_str)
-    c.setAlpha(alpha)
-    return c
+def _fmt_speed(kb_per_s: float) -> str:
+    """KB/s → 自适应单位（KB/s / MB/s / GB/s）。"""
+    if kb_per_s >= 1024 * 1024:
+        return f"{kb_per_s / 1024 / 1024:.1f}GB/s"
+    if kb_per_s >= 1024:
+        return f"{kb_per_s / 1024:.1f}MB/s"
+    return f"{kb_per_s:.0f}KB/s"
 
 
-class SparkLine(QWidget):
-    """滚动历史曲线（QPainter 自绘）。
-
-    value() 范围 [min_v, max_v]，自动归一化到控件高度；
-    内部保留最近 N 个采样点，新点从右侧进入、旧点向左滚动。
-    """
-
-    def __init__(self, color: str, min_v: float = 0.0, max_v: float = 100.0,
-                 max_points: int = _HISTORY, parent=None):
-        super().__init__(parent)
-        self._color = QColor(color)
-        self._min_v = min_v
-        self._max_v = max_v
-        self._max_points = max_points
-        self._data: deque[float] = deque(maxlen=max_points)
-        self.setFixedHeight(28)
-        self.setSizePolicy(
-            self.sizePolicy().horizontalPolicy(),
-            self.sizePolicy().verticalPolicy(),
-        )
-
-    def add(self, value: float) -> None:
-        self._data.append(value)
-        self.update()
-
-    def clear(self) -> None:
-        self._data.clear()
-        self.update()
-
-    def paintEvent(self, event):
-        if not self._data:
-            return
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        w, h = self.width(), self.height()
-        if w <= 2 or h <= 2:
-            p.end()
-            return
-
-        span = self._max_v - self._min_v
-        if span <= 0:
-            p.end()
-            return
-
-        def to_point(i: int, v: float) -> QPointF:
-            x = (i + 0.5) / self._max_points * w
-            y = h - 2 - (v - self._min_v) / span * (h - 4)
-            return QPointF(x, max(0.0, min(float(h - 2), y)))
-
-        # 填充渐变（曲线下方向透明）
-        fill = QPainterPath()
-        pts = [to_point(i, v) for i, v in enumerate(self._data)]
-        fill.moveTo(pts[0].x(), float(h))
-        for pt in pts:
-            fill.lineTo(pt)
-        fill.lineTo(pts[-1].x(), float(h))
-        fill.closeSubpath()
-        p.setPen(Qt.PenStyle.NoPen)
-        grad = QColor(self._color)
-        grad.setAlpha(60)
-        p.setBrush(grad)
-        p.drawPath(fill)
-
-        # 曲线本身
-        path = QPainterPath()
-        path.moveTo(pts[0])
-        for pt in pts[1:]:
-            path.lineTo(pt)
-        p.setPen(QColor(self._color))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawPath(path)
-        p.end()
+def _fmt_uptime(hours: float) -> str:
+    total_minutes = int(hours * 60)
+    days = total_minutes // (24 * 60)
+    h = total_minutes % (24 * 60) // 60
+    m = total_minutes % 60
+    parts = []
+    if days >= 1:
+        parts.append(f"{days}天")
+    if h >= 1:
+        parts.append(f"{h}小时")
+    if m > 0 and days < 1:
+        parts.append(f"{m}分")
+    if not parts:
+        parts.append(f"{m}分")
+    return " ".join(parts)
 
 
-class NetSpark(QWidget):
-    """网络迷你双曲线：下行（下）/上行（上）方向相反的填充区。"""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._down: deque[float] = deque(maxlen=_HISTORY)
-        self._up: deque[float] = deque(maxlen=_HISTORY)
-        self.setFixedHeight(24)
-        self.setSizePolicy(
-            self.sizePolicy().horizontalPolicy(),
-            self.sizePolicy().verticalPolicy(),
-        )
-
-    def add(self, down_kb: float, up_kb: float) -> None:
-        self._down.append(down_kb)
-        self._up.append(up_kb)
-        self.update()
-
-    def clear(self) -> None:
-        self._down.clear()
-        self._up.clear()
-        self.update()
-
-    def paintEvent(self, event):
-        if not self._down:
-            return
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        w, h = self.width(), self.height()
-        if w <= 2 or h <= 2:
-            p.end()
-            return
-
-        # 动态最大值：取当前窗口内最大速率，避免曲线永远贴着顶部
-        peak = max(max(self._down or [0]), max(self._up or [0]), 1.0)
-
-        mid = h / 2.0
-        def to_pt(data: deque, i: int, sign: float) -> QPointF:
-            x = (i + 0.5) / _HISTORY * w
-            y = mid - sign * (data[i] / peak) * (mid - 2)
-            return QPointF(x, max(1.0, min(float(h - 1), y)))
-
-        def draw_side(data: deque, color_hex: str, sign: float) -> None:
-            color = QColor(color_hex)
-            path = QPainterPath()
-            pts = [to_pt(data, i, sign) for i in range(len(data))]
-            path.moveTo(pts[0].x(), mid)
-            for pt in pts:
-                path.lineTo(pt)
-            path.lineTo(pts[-1].x(), mid)
-            path.closeSubpath()
-            p.setPen(Qt.PenStyle.NoPen)
-            grad = QColor(color)
-            grad.setAlpha(45)
-            p.setBrush(grad)
-            p.drawPath(path)
-            # 曲线本身
-            line = QPainterPath()
-            line.moveTo(pts[0])
-            for pt in pts[1:]:
-                line.lineTo(pt)
-            p.setPen(color)
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawPath(line)
-
-        draw_side(self._up, GREEN(), -1)     # 上行（绿色，上半）
-        draw_side(self._down, ACCENT, 1)     # 下行（蓝色，下半）
-
-        # 中间分隔线（跟随主题：深色用白、浅色用黑，透明度低）
-        sep_hex = "#ffffff" if _is_dark_theme() else "#000000"
-        p.setPen(_hex_color(sep_hex, 26))
-        p.drawLine(0, int(mid), w, int(mid))
-        p.end()
-
-
-class SystemMonitorPlugin(Plugin):
+class SystemMonitorPlugin(SystemPlugin):
     id = "system_monitor"
     name = "系统监控"
-    version = "0.3.0"
+    version = "0.4.0"
     description = "CPU/内存/磁盘/GPU/网络实时曲线、开机时长"
-    refresh_interval = 1000
+    refresh_interval = 2000
 
     def __init__(self, context=None):
         super().__init__(context)
@@ -293,12 +108,24 @@ class SystemMonitorPlugin(Plugin):
         }
         self._sparks: dict[str, SparkLine] = {}
         self._pct_labels: dict[str, QLabel] = {}
-        self._mem_labels: dict[str, QLabel] = {}
         self._gpu_sparks: list[tuple[str, SparkLine, QLabel, QLabel]] = []
         self._net_spark: NetSpark | None = None
         self._net_labels: dict[str, QLabel] = {}
         self._uptime_label: QLabel | None = None
         self._net = NetSampler()
+
+        # 注册各域采集器（对应 Glances 各插件的 update_local）
+        self.register_sample("cpu", cpu_percent)
+        self.register_sample("mem", mem_percent)
+        self.register_sample("disk", disk_io_percent)
+        # GPU：多卡自动枚举 + 降频（每 5 次 tick ≈10s）
+        self.register_sample("gpu", self._gpu_util)
+
+    # ---- GPU 采集（降频 + 多卡） ----
+
+    @throttled(5)
+    def _gpu_util(self) -> list[dict]:
+        return gpu_stats()
 
     # ---- 设置持久化 ----
 
@@ -455,46 +282,51 @@ class SystemMonitorPlugin(Plugin):
     # ---- 刷新 ----
 
     def tick(self) -> None:
-        if not self._sparks and not self._net_spark and not self._gpu_sparks:
+        # 任一分区可见（含开机时长）都要刷新；全隐藏时才跳过采样
+        if not (self._sparks or self._gpu_sparks
+                or self._net_spark is not None
+                or self._uptime_label is not None):
             return
+        self.collect()
 
         if "cpu" in self._sparks:
-            cpu = cpu_percent()
+            cpu = int(self._stats.get("cpu", 0))
             self._sparks["cpu"].add(cpu)
             self._pct_labels["cpu"].setText(f"{cpu}%")
             self._pct_labels["cpu"].setStyleSheet(
                 f"font-size: 13px; font-weight: 700; color: {percent_color(cpu)};")
 
         if "mem" in self._sparks:
-            mem = mem_percent()
+            mem = int(self._stats.get("mem", 0))
             self._sparks["mem"].add(mem)
             self._pct_labels["mem"].setText(f"{mem}%")
             self._pct_labels["mem"].setStyleSheet(
                 f"font-size: 13px; font-weight: 700; color: {percent_color(mem)};")
 
         if "disk" in self._sparks:
-            disk = disk_io_percent()
+            disk = int(self._stats.get("disk", 0))
             self._sparks["disk"].add(disk)
             self._pct_labels["disk"].setText(f"{disk}%")
             self._pct_labels["disk"].setStyleSheet(
                 f"font-size: 13px; font-weight: 700; color: {percent_color(disk)};")
 
-        # GPU：多卡自动更新
-        if self._gpu_sparks:
-            gpu_data = gpu_stats()
-            for idx, (key, spark, pct_lbl, mem_lbl) in enumerate(self._gpu_sparks):
-                if idx < len(gpu_data):
-                    d = gpu_data[idx]
-                    util = d["util"]
-                    spark.add(util)
-                    pct_lbl.setText(f"{util}%")
-                    pct_lbl.setStyleSheet(
-                        f"font-size: 12px; font-weight: 700; color: {percent_color(util)};")
-                    if d["mem_total_mb"] > 0:
-                        mem_lbl.setText(
-                            f"{_fmt_mb(d['mem_used_mb'])}/{_fmt_mb(d['mem_total_mb'])}")
-                    else:
-                        mem_lbl.setText("")
+        # GPU：多卡自动更新（采集已由基类节流降频，见 _gpu_util）
+        gpu_data = self._stats.get("gpu", [])
+        if not isinstance(gpu_data, list):
+            gpu_data = []
+        for idx, (key, spark, pct_lbl, mem_lbl) in enumerate(self._gpu_sparks):
+            if idx < len(gpu_data):
+                d = gpu_data[idx]
+                util = int(d["util"])
+                spark.add(util)
+                pct_lbl.setText(f"{util}%")
+                pct_lbl.setStyleSheet(
+                    f"font-size: 12px; font-weight: 700; color: {percent_color(util)};")
+                if d["mem_total_mb"] > 0:
+                    mem_lbl.setText(
+                        f"{_fmt_mb(d['mem_used_mb'])}/{_fmt_mb(d['mem_total_mb'])}")
+                else:
+                    mem_lbl.setText("")
 
         if self._net_spark is not None:
             down, up = self._net.sample()
@@ -507,6 +339,7 @@ class SystemMonitorPlugin(Plugin):
             self._uptime_label.setText(_fmt_uptime(hours))
 
     def on_stop(self) -> None:
+        super().on_stop()
         self._sparks = {}
         self._pct_labels = {}
         self._gpu_sparks = []
@@ -519,40 +352,6 @@ class SystemMonitorPlugin(Plugin):
         from .settings_dialog import SettingsDialog
 
         return SettingsDialog(self, parent)
-
-
-def _fmt_mb(mb: int) -> str:
-    """MB → 自适应单位（GB 显示小数，MB 显示整数）。"""
-    if mb >= 1024:
-        gb = mb / 1024
-        return f"{gb:.1f}G" if gb < 10 else f"{gb:.0f}G"
-    return f"{mb}M"
-
-
-def _fmt_speed(kb_per_s: float) -> str:
-    """KB/s → 自适应单位（KB/s / MB/s / GB/s）。"""
-    if kb_per_s >= 1024 * 1024:
-        return f"{kb_per_s / 1024 / 1024:.1f}GB/s"
-    if kb_per_s >= 1024:
-        return f"{kb_per_s / 1024:.1f}MB/s"
-    return f"{kb_per_s:.0f}KB/s"
-
-
-def _fmt_uptime(hours: float) -> str:
-    total_minutes = int(hours * 60)
-    days = total_minutes // (24 * 60)
-    h = total_minutes % (24 * 60) // 60
-    m = total_minutes % 60
-    parts = []
-    if days >= 1:
-        parts.append(f"{days}天")
-    if h >= 1:
-        parts.append(f"{h}小时")
-    if m > 0 and days < 1:
-        parts.append(f"{m}分")
-    if not parts:
-        parts.append(f"{m}分")
-    return " ".join(parts)
 
 
 def create_plugin() -> SystemMonitorPlugin:
