@@ -12,7 +12,13 @@ from PySide6.QtGui import QAction, QColor, QGuiApplication
 from PySide6.QtWidgets import QLayout, QMenu, QVBoxLayout, QWidget
 
 import core.theme as theme
-from core.kwin import is_kde_session, set_keepabove, unload_keepabove_script
+from core.kwin import (
+    caption_token,
+    is_kde_session,
+    script_name,
+    set_keepabove,
+    unload_keepabove_script,
+)
 from core.window_manager import MAIN_ID
 from ui.sections import SectionsContainer
 
@@ -42,8 +48,11 @@ class PluginWindow(QWidget):
         self._targets: list[tuple[str, str]] = []
         self._manager = None  # WindowManager
         self._user_closing = False
+        self._split_done = False  # 拆分幂等标记（WindowManager 置位/复位）
 
-        self.setWindowTitle(f"{title} - usage-widget")
+        # 标题带每窗口唯一的置顶标记（KWin 脚本据此精确匹配本窗口，
+        # 见 core.kwin.caption_token）；窗口无边框，标题仅内部使用
+        self.setWindowTitle(f"{title} - {caption_token(window_id)}")
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.Tool
@@ -167,8 +176,12 @@ class PluginWindow(QWidget):
         QTimer.singleShot(0, self._fit_to_content)
 
     def rebuild(self) -> None:
-        """按当前 _plugins 顺序重建分区（实例不变，仅重建 UI 顺序）。"""
+        """按当前 _plugins 顺序重建分区（实例不变，仅重建 UI 顺序）。
+
+        保留各分区的折叠状态与「显示分区」隐藏设置。
+        """
         hidden = set(self.config.get("window", "hidden_sections", default=[]) or [])
+        collapsed = self._container.collapsed_keys()
         plugins = list(self._plugins.values())
         # 先卸载 UI（不 stop 实例，稍后重新挂载）
         for pid in list(self._plugins):
@@ -183,6 +196,8 @@ class PluginWindow(QWidget):
             self._plugins.pop(pid, None)
         for p in plugins:
             self.add_plugin(p)
+            if p.id in collapsed:
+                self._container.collapse_section(p.id)
             if p.id in hidden:
                 self.hide_section(p.id)
         QTimer.singleShot(0, self._fit_to_content)
@@ -364,7 +379,7 @@ class PluginWindow(QWidget):
         if "wayland" not in QGuiApplication.platformName():
             self.move(pos)
         if is_kde_session():
-            set_keepabove(on, f"usage-widget-{self.window_id}-keepabove")
+            set_keepabove(on, self.window_id)
 
     def _toggle_topmost(self, checked: bool) -> None:
         self.apply_topmost(checked)
@@ -387,7 +402,7 @@ class PluginWindow(QWidget):
 
     def closeEvent(self, event):
         if is_kde_session():
-            unload_keepabove_script(f"usage-widget-{self.window_id}-keepabove")
+            unload_keepabove_script(script_name(self.window_id))
         # 只有用户主动关闭（菜单「关闭」/点 X）才通知管理器回收插件；
         # 程序内部 deleteLater 触发的 close 不应触发（防止重启恢复时
         # 窗口被误判为「用户关闭」而把插件挪回主窗口）。

@@ -123,6 +123,18 @@ class SectionsContainer(QWidget):
                 section.setVisible(visible)
                 break
 
+    def collapsed_keys(self) -> set[str]:
+        """当前处于折叠状态的分区 key 集合。"""
+        return {s.key for s in self._sections if s._collapsed}
+
+    def collapse_section(self, key: str) -> None:
+        """把分区折叠（不触发 toggle，用于重建后恢复折叠状态）。"""
+        for section in self._sections:
+            if section.key == key:
+                if not section._collapsed:
+                    section.toggle_collapse()
+                break
+
     def replace_section(self, key: str, content: QWidget) -> bool:
         """替换单个分区的内容 widget（其他分区不受影响）。"""
         for section in self._sections:

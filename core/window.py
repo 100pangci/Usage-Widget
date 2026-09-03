@@ -15,7 +15,12 @@ from PySide6.QtGui import QAction, QColor, QGuiApplication
 from PySide6.QtWidgets import QApplication, QDialog, QMenu
 
 import core.theme as theme
-from core.kwin import is_kde_session, set_keepabove, unload_keepabove_script
+from core.kwin import (
+    is_kde_session,
+    script_name,
+    set_keepabove,
+    unload_keepabove_script,
+)
 from core.plugin_window import PluginWindow
 from core.window_manager import MAIN_ID, WindowManager
 from plugins.base import Plugin
@@ -58,8 +63,7 @@ class FloatingWindow(PluginWindow):
                 self.windowFlags() & ~Qt.WindowType.WindowStaysOnTopHint)
         elif is_kde_session():
             QTimer.singleShot(
-                800, lambda: set_keepabove(
-                    True, f"usage-widget-{MAIN_ID}-keepabove"))
+                800, lambda: set_keepabove(True, MAIN_ID))
 
     def _on_window_layout_changed(self) -> None:
         """窗口/插件分配变化：刷新所有窗口的合并目标 + 主窗口菜单。"""
@@ -98,12 +102,17 @@ class FloatingWindow(PluginWindow):
         self._menu.addAction(cfg_action)
 
         quit_action = QAction("退出", self)
-        quit_action.triggered.connect(self.close)
+        quit_action.triggered.connect(self._quit_all)
         self._menu.addAction(quit_action)
 
         self._refresh_main_menu()
 
     def _refresh_main_menu(self) -> None:
+        """重建主窗口「显示分区 / 插件设置 / 窗口」三个子菜单。
+
+        各窗口自身的「置顶」勾选与「合并到」菜单在 PluginWindow 里维护，
+        这里不重建，避免误删其他窗口的菜单状态。
+        """
         hidden = set(self.config.get("window", "hidden_sections", default=[]) or [])
         # 显示分区
         self._sections_menu.clear()
@@ -162,19 +171,32 @@ class FloatingWindow(PluginWindow):
             hidden.append(pid)
         self.config.set("window", "hidden_sections", value=hidden)
         self.config.save()
+        # 「插件设置」子菜单按可见性过滤：显隐后必须重建，
+        # 否则重新显示的分区不会出现设置入口（隐藏时被跳过）
+        self._refresh_main_menu()
         QTimer.singleShot(0, lambda: self._fit_to_content())
 
     def _open_plugin_settings_dlg(self, plugin) -> None:
-        dialog = plugin.settings_dialog(self)
+        try:
+            dialog = plugin.settings_dialog(self)
+        except Exception:
+            log.exception("插件 %s 设置对话框打开失败", plugin.id)
+            return
         if dialog is not None and dialog.exec() == QDialog.DialogCode.Accepted:
             self._rebuild_plugin_section(plugin)
 
     def _rebuild_plugin_section(self, plugin) -> None:
+        """只重建该插件自己的分区：分离→挂载→恢复折叠/隐藏状态。"""
         hidden = set(self.config.get("window", "hidden_sections", default=[]) or [])
+        collapsed = set(self._container.collapsed_keys())
         self.remove_plugin(plugin.id)
         self.add_plugin(plugin)
+        if plugin.id in collapsed:
+            self._container.collapse_section(plugin.id)
         if plugin.id in hidden:
             self.hide_section(plugin.id)
+        # 各窗口「合并到」目标可能变化（插件 id 集变了），刷新
+        self._refresh_all_merge_targets()
         self._refresh_main_menu()
 
     # ---- 分离插件到独立窗口 ----
@@ -239,9 +261,14 @@ class FloatingWindow(PluginWindow):
 
     def _reload_plugins(self) -> None:
         log.info("重新加载插件")
+        # 停旧实例（stop 不清 plugins——旧实例要先留在窗口的 _plugins
+        # 里被 restore 挨个 remove_plugin（stop）后卸载，避免 remove 时
+        # 误伤新实例）
         self.manager.reload()
         self.manager.start_all()
+        # restore 会先清空所有窗口已挂载的旧插件，再按新实例表挂载
         self.window_manager.restore()
+        self._refresh_all_merge_targets()
         self._refresh_main_menu()
 
     def _open_config_dir(self) -> None:
@@ -264,7 +291,7 @@ class FloatingWindow(PluginWindow):
             self.move(pos)
         self.config.set("window", "always_on_top", value=bool(checked))
         self.config.save()
-        set_keepabove(bool(checked), f"usage-widget-{self.window_id}-keepabove")
+        set_keepabove(bool(checked), self.window_id)
 
     def _apply_saved_position(self) -> None:
         pos = self.config.get("window", "position", default=[])
@@ -274,11 +301,22 @@ class FloatingWindow(PluginWindow):
     def _is_wayland(self) -> bool:
         return "wayland" in QGuiApplication.platformName()
 
+    def _quit_all(self) -> None:
+        """退出：结束进程。
+
+        直接关主窗口时若还有独立窗口，closeEvent 会 ignore 只隐藏，
+        应用不退出——「退出」菜单应完整结束程序。quit() 触发
+        aboutToQuit → stop_all 收尾所有插件后台线程。
+        """
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
     def closeEvent(self, event):
         if not self._is_wayland():
             self.config.set("window", "position", value=[self.x(), self.y()])
             self.config.save()
-        unload_keepabove_script(f"usage-widget-{self.window_id}-keepabove")
+        unload_keepabove_script(script_name(self.window_id))
         # 退出时给后台线程 2.5s 收尾
         self.manager.stop_all(grace_ms=2500)
         # 还有独立窗口：主窗口隐藏，应用继续跑

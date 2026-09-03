@@ -93,6 +93,7 @@ def test_rate_sampler_computes_rate():
     # 人为缩短时间间隔来验证差值逻辑
     rs._last_t -= 10.0  # 模拟 10 秒前采样
     rate = rs.sample(2000)
-    assert abs(rate - 100.0) < 1e-6  # (2000-1000)/10
+    # (2000-1000)/10；两次调用间真实时间仍会流逝，容差放宽
+    assert abs(rate - 100.0) < 0.1
     rs.reset()
     assert rs.sample(0) == 0.0

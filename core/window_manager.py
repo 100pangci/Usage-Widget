@@ -117,6 +117,13 @@ class WindowManager:
         """把 src 窗口全部插件合并到 dst 窗口，src 关闭。"""
         if src_id == dst_id or src_id not in self.windows or dst_id not in self.windows:
             return
+        if src_id == MAIN_ID:
+            # 主窗口不能作为被合并源（合并菜单里也不列主窗口为目标的对端，
+            # 这里兜底防御：防止把主窗口合并掉导致系统菜单/入口丢失）
+            return
+        if not self.windows[src_id].plugin_ids:
+            self.close_window(src_id, merge_plugins=False)
+            return
         for pid in list(self.windows[src_id].plugin_ids):
             self.move_plugin(src_id, dst_id, pid)
         self.close_window(src_id, merge_plugins=False)
@@ -137,6 +144,10 @@ class WindowManager:
         plugins = [p for p in plugins if p is not None]
         if not plugins:
             return
+        # 幂等：每个插件最多拆一次（防御重复触发/回调竞态）
+        if getattr(win, "_split_done", False):
+            return
+        win._split_done = True
         if window_id == MAIN_ID:
             # 主窗口：每个插件拆成独立窗口，主窗口保留但隐藏（空窗口无意义）
             for plugin in plugins:
@@ -164,6 +175,12 @@ class WindowManager:
         self.attach_plugin(wid, plugin)
         win = self.windows.get(wid)
         if win is not None:
+            # 新建的窗口没有持久化历史，先清 flag 再 set（避免 show 时
+            # 带着 setWindowFlags 触发的重建被 KWin 脚本以旧状态补齐）
+            win.setWindowFlags(
+                win.windowFlags() & ~Qt.WindowType.WindowStaysOnTopHint)
+            win.setWindowFlags(
+                win.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
             win.show()
         return wid
 
@@ -213,6 +230,8 @@ class WindowManager:
                 if wc.get("topmost") is False:
                     win.apply_topmost(False)
                 win.show()
+                # 已拆过标记复位（窗口集已重建）
+                win._split_done = False
         self.persist()
 
     def _spawn_window(self, window_id: str, wc: dict, title: str | None = None) -> None:

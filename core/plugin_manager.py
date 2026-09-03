@@ -6,6 +6,7 @@ create_plugin() 工厂函数返回插件实例。单个插件失败不影响其�
 import importlib
 import logging
 import sys
+import threading
 import time
 import types
 from pathlib import Path
@@ -118,6 +119,9 @@ class PluginManager:
         self.config = config
         self.plugins_dir = Path(plugins_dir) if plugins_dir else default_plugins_dir()
         self.plugins: dict[str, Plugin] = {}
+        # 加载互斥锁：reload/stop_all 可能在 worker 线程回调里触发，
+        # 防止 load_all 重入或与 stop_all 并发清理 self.plugins
+        self._load_lock = threading.Lock()
 
     # ---- 加载 ----
 
@@ -132,9 +136,16 @@ class PluginManager:
           插件视为用户主动禁用）
         - enabled 为空（显式禁用所有）时保持加载零个插件
         """
+        with self._load_lock:
+            self.plugins.clear()
+            return self._load_all_locked()
+
+    def _load_all_locked(self) -> list[str]:
         self.stop_all()
         self.plugins.clear()
+        return self._do_load()
 
+    def _do_load(self) -> list[str]:
         conf = self.config.get("plugins", default={}) or {}
         enabled = list(conf.get("enabled") or [])
         order = list(conf.get("order") or enabled)
@@ -217,8 +228,12 @@ class PluginManager:
             if grace_ms:
                 remaining = max(0, int((deadline - time.monotonic()) * 1000))
             plugin.stop(remaining)
+        # 停完即清：防止 stop_all 后（如 reload 的 load_all 第一步、
+        # 全禁用后重启窗口等）残留死实例引用，窗口/菜单随后访问
+        # self.plugins 时拿到的是已停止的旧插件
+        self.plugins.clear()
 
     def reload(self) -> list[str]:
         """重新扫描并加载插件（先停旧实例）。"""
-        self.stop_all()
-        return self.load_all()
+        with self._load_lock:
+            return self._load_all_locked()

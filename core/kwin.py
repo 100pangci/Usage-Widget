@@ -3,20 +3,33 @@ import logging
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 
 log = logging.getLogger("usage-widget.kwin")
 
 _KDE_ENV_MARKERS = ("KDE_FULL_SESSION", "KDE_SESSION_VERSION")
 
-# KWin 脚本：匹配 usage-widget 前缀标题 + 资源类名，设置 keepAbove。
+
+def caption_token(window_id: str) -> str:
+    """窗口标题里的唯一置顶标记（PluginWindow 构造时写进标题）。"""
+    return f"usage-widget/{window_id}"
+
+
+def script_name(window_id: str) -> str:
+    """KWin 脚本名（按窗口区分，卸载/重载互不影响）。"""
+    return f"usage-widget-{window_id}-keepabove"
+
+
+# KWin 脚本：只匹配本窗口标题里的唯一标记并设置 keepAbove。
+# 不能按 "usage-widget" 子串或资源类名匹配——那会把标题恰好含
+# "usage-widget" 的其他应用窗口（文件管理器/终端打开相关目录等）
+# 一起置顶，也会让本应用的其他窗口被任意窗口的脚本连带置顶
+# （各窗口置顶状态独立）。
 _KWIN_KEEP_ABOVE_SCRIPT = """
 function applyKeepAbove(w) {
     if (!w) return;
     var c = String(w.caption || "");
-    var r = String(w.resourceClass || "");
-    if (r === "usage-widget" || c.indexOf("usage-widget") >= 0) {
+    if (c.indexOf("%s") >= 0) {
         w.keepAbove = %s;
     }
 }
@@ -72,23 +85,25 @@ def unload_keepabove_script(script_name: str = "usage-widget-keepabove") -> None
     ])
 
 
-def set_keepabove(on: bool, script_name: str = "usage-widget-keepabove") -> bool:
-    """通过 KWin 脚本设置窗口置顶（脚本名按窗口区分）。"""
+def set_keepabove(on: bool, window_id: str = "main") -> bool:
+    """通过 KWin 脚本设置指定窗口置顶（脚本与匹配标记按窗口区分）。"""
     if not is_kde_session():
         return False
+    name = script_name(window_id)
     try:
         with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
-            f.write(_KWIN_KEEP_ABOVE_SCRIPT % ("true" if on else "false"))
+            f.write(_KWIN_KEEP_ABOVE_SCRIPT % (
+                caption_token(window_id), "true" if on else "false"))
             script_path = f.name
     except OSError as e:
         log.warning("写入 KWin 脚本失败: %s", e)
         return False
     try:
-        unload_keepabove_script(script_name)
+        unload_keepabove_script(name)
         code, out = _run_qdbus([
             "org.kde.KWin", "/Scripting",
             "org.kde.kwin.Scripting.loadScript",
-            script_path, script_name,
+            script_path, name,
         ])
         if code != 0 or not out.isdigit():
             log.warning("KWin 脚本加载失败（%s）：%s", code, out)

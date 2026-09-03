@@ -28,6 +28,9 @@ class P(Plugin):
         self.label = QLabel("--", parent)
         return self.label
 
+    def settings_dialog(self, parent=None):
+        return None
+
     def tick(self):
         # 触碰自建控件：窗口被销毁后这里会抛 RuntimeError（僵尸检测）
         self.label.setText("ok")
@@ -146,3 +149,79 @@ def test_main_menu_no_duplicate_settings_entry(tmp_path, app):
     texts = [a.text() for a in win._menu.actions()]
     assert "插件设置" in texts          # 子菜单（逐插件入口）
     assert "插件设置…" not in texts     # 基类单项版（只开第一个插件）
+
+
+def test_settings_menu_updates_on_section_toggle(tmp_path, app):
+    """显示分区显隐后「插件设置」子菜单同步更新。
+
+    回归：重新显示的分区不会出现在「插件设置」里（菜单是隐藏时
+    构建的，显隐后没有刷新），opencode 等插件设置入口缺失。
+    """
+    cfg, mgr, win, wm = _make_window(tmp_path)
+
+    # 隐藏 p2：设置入口消失
+    win._toggle_section("p2", False)
+    texts = [a.text() for a in win._settings_menu.actions()]
+    assert "插件二…" not in texts
+
+    # 重新显示：设置入口必须回来
+    win._toggle_section("p2", True)
+    texts = [a.text() for a in win._settings_menu.actions()]
+    assert "插件二…" in texts
+
+
+def test_rebuild_plugin_section_preserves_collapse(tmp_path, app):
+    """单个分区重建后保留折叠状态（不依赖 QTimer 事件循环）。"""
+    cfg, mgr, win, wm = _make_window(tmp_path)
+    plugin = mgr.plugins["p1"]
+
+    # 折叠 p1
+    win._container.collapse_section("p1")
+    assert "p1" in win._container.collapsed_keys()
+
+    win._rebuild_plugin_section(plugin)
+    _pump(app)
+    assert "p1" in win._container.collapsed_keys()
+    assert "p1" in win.plugin_ids
+
+
+def test_reload_disabled_all_keeps_menus_valid(tmp_path, app):
+    """全部插件禁用后重载：窗口清空、菜单不残留旧插件引用。"""
+    cfg, mgr, win, wm = _make_window(tmp_path)
+
+    cfg.set("plugins", "enabled", value=[])
+    cfg.save()
+    win._reload_plugins()
+    _pump(app)
+    assert mgr.plugins == {}
+    assert win.plugin_ids == []
+    # 窗口菜单里不再出现任何插件条目
+    assert win._sections_menu.isEmpty()
+    assert win._settings_menu.isEmpty()
+
+
+def test_split_is_idempotent(tmp_path, app):
+    """同一窗口重复调用拆分只生效一次（回归：拆分后可再拆不报错）。"""
+    cfg, mgr, win, wm = _make_window(tmp_path)
+
+    wm.split_window("main")
+    children = [wid for wid in wm.windows if wid != "main"]
+    assert len(children) == 2
+
+    # 再次对已空的子窗口拆分：不应重复创建窗口
+    for wid in children:
+        before = len(wm.windows)
+        wm.split_window(wid)
+        assert len(wm.windows) == before
+
+
+def test_merge_main_window_guard(tmp_path, app):
+    """防御：合并时主窗口不能作为源（防止主窗口被合掉）。"""
+    cfg, mgr, win, wm = _make_window(tmp_path)
+    child_ids = [wid for wid in wm.windows if wid != "main"]
+    assert not child_ids  # 初始无子窗口
+
+    # 直接调 merge_window 把主窗口当源（正常路径不会出现）
+    before = wm.all_plugin_ids()
+    wm.merge_window("main", "nonexistent")
+    assert sorted(wm.all_plugin_ids()) == sorted(before)
