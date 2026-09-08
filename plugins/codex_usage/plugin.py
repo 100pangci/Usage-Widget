@@ -365,17 +365,17 @@ class CodexUsagePlugin(Plugin):
         make_window("primary", "5 小时窗口")
         make_window("secondary", "每周窗口")
 
-        status = QLabel("初始化…")
-        status.setWordWrap(True)
-        status.setStyleSheet(f"font-size: 11px; color: {DIM()};")
-        lay.addWidget(status)
-        self._labels["status"] = status
-
         plan = QLabel("--")
         plan.setAlignment(Qt.AlignmentFlag.AlignCenter)
         plan.setStyleSheet(f"font-size: 12px; color: {DIM()};")
         lay.addWidget(plan)
         self._labels["plan"] = plan
+
+        status = QLabel("初始化…")
+        status.setWordWrap(True)
+        status.setStyleSheet(f"font-size: 11px; color: {DIM()};")
+        lay.addWidget(status)
+        self._labels["status"] = status
         return widget
 
     def settings_dialog(self, parent=None):
