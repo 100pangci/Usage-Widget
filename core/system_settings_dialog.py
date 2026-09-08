@@ -120,13 +120,16 @@ class SystemSettingsDialog(QDialog):
         return self._window_ids[idx] if 0 <= idx < len(self._window_ids) else "main"
 
     def _load_window_plugins(self, *_) -> None:
-        """加载当前选中窗口的插件列表。"""
+        """加载当前选中窗口的插件列表（只列「显示分区」开启的分区）。"""
         self._plugin_list.clear()
         wid = self._current_window_id()
         win = self._windows.get(wid)
         if win is None:
             return
+        hidden = set(self.config.get("window", "hidden_sections", default=[]) or [])
         for pid in win.plugin_ids:
+            if pid in hidden:
+                continue
             item = QListWidgetItem(pid)
             item.setData(Qt.ItemDataRole.UserRole, pid)
             self._plugin_list.addItem(item)
@@ -152,30 +155,71 @@ class SystemSettingsDialog(QDialog):
     # ---- 保存 ----
 
     def _save(self) -> None:
+        old_theme = self.config.get("window", "theme", default=theme.DARK)
         new_theme = self._theme_combo.currentData()
         new_alpha = self._opacity_slider.value() / 100.0
         self.config.set("window", "theme", value=new_theme)
         self.config.set("window", "opacity", value=round(new_alpha, 2))
 
-        # 把当前选中窗口的列表写回（UI 里只改了一个窗口）
+        # 把当前选中窗口的列表写回（UI 里只改了一个窗口）。
+        # 列表只含「显示分区」开启的分区；保存时把关闭的分区留在
+        # 原槽位，否则会从配置里丢插件、重启后顺序错乱。
         wid = self._current_window_id()
+        target = self._windows.get(wid)
         order = []
         for i in range(self._plugin_list.count()):
             item = self._plugin_list.item(i)
             pid = item.data(Qt.ItemDataRole.UserRole)
             if pid:
                 order.append(pid)
+        new_full = order
+        if target is not None:
+            hidden = set(self.config.get("window", "hidden_sections", default=[]) or [])
+            # 隐藏分区占原槽位不动，开启的分区按对话框里的新顺序
+            # 依次填入剩余槽位，构成完整顺序再写配置/应用运行时
+            order_iter = iter(order)
+            taken = set()
+            new_full = []
+            for pid in target.plugin_ids:
+                if pid in hidden:
+                    new_full.append(pid)
+                else:
+                    nxt = next(order_iter, None)
+                    if nxt is None:
+                        nxt = pid
+                    new_full.append(nxt)
+                    taken.add(nxt)
+            # 兜底：列表里未能归位的项补在末尾（正常不会发生）
+            new_full += [
+                pid for pid in order
+                if pid not in taken and pid not in new_full]
         windows = dict(self.config.get("windows", default={}) or {})
         wconf = dict(windows.get(wid, {}))
-        wconf["plugins"] = order
+        wconf["plugins"] = new_full
         windows[wid] = wconf
         self.config.set("windows", value=windows)
         self.config.save()
 
         # 应用主题 + 透明度
         self.window.apply_theme(new_theme, new_alpha)
-        # 重建对应窗口的分区（顺序生效；实例不变，只重建 UI 顺序）
-        target = self._windows.get(wid)
-        if target is not None:
-            target.rebuild()
+        # 透明度只影响面板绘制，不需要重建插件 UI。重建会销毁并重新
+        # 创建插件控件，系统监控等插件可能因此重新初始化硬件信息，
+        # 造成保存透明度后长时间显示「初始化…」。
+        theme_changed = old_theme != new_theme
+        order_changed = (
+            target is not None and target.plugin_ids != new_full)
+        if order_changed:
+            # 运行时立即按新顺序重排：rebuild 后 _plugins 挂载顺序
+            # 与配置一致，后续任何 persist()（拖动/关窗/合并）都不会
+            # 再把配置回滚成旧顺序。重排已经按新主题重建了 UI。
+            target.reorder_plugins(new_full)
+            if theme_changed:
+                for win in list(self._windows.values()):
+                    if win is not target:
+                        win.rebuild()
+        elif theme_changed:
+            # 插件内的颜色通常在 create_widget() 时生成，主题改变时
+            # 需要重建所有窗口的插件 UI；透明度改变则不需要。
+            for win in list(self._windows.values()):
+                win.rebuild()
         self.accept()

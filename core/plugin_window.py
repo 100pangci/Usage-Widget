@@ -175,6 +175,19 @@ class PluginWindow(QWidget):
                 log.exception("恢复插件 %s 失败", pid)
         QTimer.singleShot(0, self._fit_to_content)
 
+    def reorder_plugins(self, ids: list[str]) -> None:
+        """按给定 id 顺序重排分区并重建 UI（实例不变，隐藏分区也参与）。
+
+        系统设置保存窗口顺序时调用：把运行时挂载顺序与配置同步，
+        否则后续任意 persist()（拖动/关窗/合并等）都会把配置回滚成
+        旧顺序，顺序改动永远不生效。
+        """
+        ordered = [pid for pid in ids if pid in self._plugins]
+        if ordered == self.plugin_ids:
+            return
+        self._plugins = {pid: self._plugins[pid] for pid in ordered}
+        self.rebuild()
+
     def rebuild(self) -> None:
         """按当前 _plugins 顺序重建分区（实例不变，仅重建 UI 顺序）。
 
@@ -200,6 +213,18 @@ class PluginWindow(QWidget):
                 self._container.collapse_section(p.id)
             if p.id in hidden:
                 self.hide_section(p.id)
+        # 重建只替换控件，不会停止仍在运行的插件定时器；但
+        # add_plugin() 看到 active timer 时也不会自动首次 tick。立即
+        # 刷新一次，避免用量插件的新控件停在「初始化…」直到下一个
+        # 60 秒周期；若旧网络请求仍在运行，插件自身会跳过重复请求。
+        for p in plugins:
+            if p.id in hidden:
+                continue
+            try:
+                if p._timer.isActive():
+                    p.tick()
+            except Exception:
+                log.exception("插件 %s 重建后立即刷新失败", p.id)
         QTimer.singleShot(0, self._fit_to_content)
 
     # ---- 主题 ----

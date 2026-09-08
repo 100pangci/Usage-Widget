@@ -185,6 +185,55 @@ def test_rebuild_plugin_section_preserves_collapse(tmp_path, app):
     assert "p1" in win.plugin_ids
 
 
+def test_rebuild_immediately_refreshes_active_plugin(tmp_path, app, monkeypatch):
+    """重建后 active timer 的插件立即刷新，避免新控件等待下一周期。"""
+    cfg, mgr, win, wm = _make_window(tmp_path)
+    plugin = mgr.plugins["p1"]
+    calls = []
+    monkeypatch.setattr(plugin, "tick", lambda: calls.append(True))
+
+    assert plugin._timer.isActive()
+    win.rebuild()
+
+    assert calls == [True]
+
+
+def test_opacity_change_does_not_rebuild_plugin_sections(tmp_path, app, monkeypatch):
+    """只改透明度时保留插件控件，避免触发耗时的插件初始化。"""
+    from core.system_settings_dialog import SystemSettingsDialog
+
+    cfg, mgr, win, wm = _make_window(tmp_path)
+    section = win._container._sections[0]
+    rebuild_calls = []
+
+    monkeypatch.setattr(win, "rebuild", lambda: rebuild_calls.append(True))
+    dialog = SystemSettingsDialog(cfg, win, win)
+    dialog._opacity_slider.setValue(dialog._opacity_slider.value() - 1)
+    dialog._save()
+
+    assert rebuild_calls == []
+    assert win._container._sections[0] is section
+    assert cfg.get("window", "opacity") == 0.91
+
+
+def test_opacity_change_updates_detached_windows(tmp_path, app):
+    """透明度是全局窗口设置，主窗口和独立窗口都要立即更新面板。"""
+    from core.system_settings_dialog import SystemSettingsDialog
+
+    cfg, mgr, win, wm = _make_window(tmp_path)
+    win._detach_plugin(mgr.plugins["p1"])
+    child_id = next(wid for wid in wm.windows if wid != "main")
+    child = wm.windows[child_id]
+
+    dialog = SystemSettingsDialog(cfg, win, win)
+    dialog._opacity_slider.setValue(dialog._opacity_slider.value() - 1)
+    dialog._save()
+
+    alpha = int(0.91 * 255)
+    assert win._container._bg_color.alpha() == alpha
+    assert child._container._bg_color.alpha() == alpha
+
+
 def test_reload_disabled_all_keeps_menus_valid(tmp_path, app):
     """全部插件禁用后重载：窗口清空、菜单不残留旧插件引用。"""
     cfg, mgr, win, wm = _make_window(tmp_path)
@@ -225,3 +274,53 @@ def test_merge_main_window_guard(tmp_path, app):
     before = wm.all_plugin_ids()
     wm.merge_window("main", "nonexistent")
     assert sorted(wm.all_plugin_ids()) == sorted(before)
+
+
+def _dialog_list_texts(dialog) -> list[str]:
+    return [dialog._plugin_list.item(i).text()
+            for i in range(dialog._plugin_list.count())]
+
+
+def test_settings_save_order_applies_and_not_reverted(tmp_path, app):
+    """系统设置排序保存：运行时顺序立即生效，后续 persist 不回滚配置。
+
+    回归：旧实现只写配置不重排运行时，_plugins 顺序不变，任何后续
+    persist()（拖动/关窗/合并）都会把刚保存的顺序回滚成旧值。
+    """
+    from core.system_settings_dialog import SystemSettingsDialog
+
+    cfg, mgr, win, wm = _make_window(tmp_path)
+    dialog = SystemSettingsDialog(cfg, win, win)
+    assert _dialog_list_texts(dialog) == ["p1", "p2"]
+
+    # p1 下移 → 保存
+    dialog._plugin_list.setCurrentRow(0)
+    dialog._move_plugin(1)
+    dialog._save()
+
+    assert win.plugin_ids == ["p2", "p1"]
+    assert [s.key for s in win._container._sections] == ["p2", "p1"]
+    assert cfg.get("windows", "main", "plugins") == ["p2", "p1"]
+    # 顺序改动后运行时已同步，persist 不应再回滚配置
+    wm.persist()
+    assert cfg.get("windows", "main", "plugins") == ["p2", "p1"]
+
+
+def test_settings_list_excludes_closed_sections(tmp_path, app):
+    """系统设置顺序列表不列「显示分区」关闭的分区；保存不丢隐藏分区。
+
+    回归：关闭分区仍挂载在窗口里，旧实现全列出来误导用户；过滤后
+    保存需把隐藏分区留在原槽位，否则配置丢插件、重新显示时错位。
+    """
+    from core.system_settings_dialog import SystemSettingsDialog
+
+    cfg, mgr, win, wm = _make_window(tmp_path)
+    win._toggle_section("p1", False)
+
+    dialog = SystemSettingsDialog(cfg, win, win)
+    assert _dialog_list_texts(dialog) == ["p2"]
+    dialog._save()
+
+    # 隐藏分区 p1 仍留在原槽位（配置与运行时一致）
+    assert win.plugin_ids == ["p1", "p2"]
+    assert cfg.get("windows", "main", "plugins") == ["p1", "p2"]

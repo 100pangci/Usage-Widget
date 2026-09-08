@@ -82,6 +82,16 @@ class FloatingWindow(PluginWindow):
             self.remove_plugin(pid)
         self.window_manager.restore()
 
+    def apply_theme(self, theme_name: str, alpha: float) -> None:
+        """应用主题/透明度，并同步更新所有独立窗口的面板。"""
+        super().apply_theme(theme_name, alpha)
+        window_manager = getattr(self, "window_manager", None)
+        if window_manager is None:
+            return
+        for window in list(window_manager.windows.values()):
+            if window is not self:
+                window.apply_theme(theme_name, alpha)
+
     # ---- 右键菜单（主窗口专属） ----
 
     def _build_main_menu(self) -> None:

@@ -333,12 +333,6 @@ class CodexUsagePlugin(Plugin):
         lay.setContentsMargins(12, 4, 12, 8)
         lay.setSpacing(5)
 
-        plan = QLabel("--")
-        plan.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        plan.setStyleSheet(f"font-size: 12px; color: {DIM()};")
-        lay.addWidget(plan)
-        self._labels["plan"] = plan
-
         def make_window(key: str, title: str) -> None:
             name = QLabel(title)
             name.setStyleSheet(f"font-size: 12px; color: {DIM()};")
@@ -376,6 +370,12 @@ class CodexUsagePlugin(Plugin):
         status.setStyleSheet(f"font-size: 11px; color: {DIM()};")
         lay.addWidget(status)
         self._labels["status"] = status
+
+        plan = QLabel("--")
+        plan.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        plan.setStyleSheet(f"font-size: 12px; color: {DIM()};")
+        lay.addWidget(plan)
+        self._labels["plan"] = plan
         return widget
 
     def settings_dialog(self, parent=None):
