@@ -4,6 +4,9 @@
 
 ### 变更
 
+- 新增 Codex 用量插件：读取 `/api/auth/session` JSON、Cookie 或 Codex `auth.json`，
+  显示与 CLI `/status` 对应的短周期/每周用量百分比及重置倒计时；网络请求在后台线程执行
+
 - **系统监控插件架构重构（v0.4.0）**：单文件采集器拆分为 `collector/`
   包（cpu/memory/disk/net/gpu/system 按指标域分模块），新增
   `SystemPlugin` 基类（注册式采样 + 节流 + 环形历史）与 `widgets.py`
@@ -17,6 +20,9 @@
 
 ### 修复
 
+- **Codex 用量测试连接偶发误报过期**：`chatgpt.com/backend-api` 按 Codex CLI
+  规则优先请求 `/wham/usage`；有 `accessToken` 时不再与 `sessionToken` Cookie
+  混合认证，并在备用路径核验后按真实 HTTP 401/403 给出诊断
 - **插件加载/重载竞态**：worker 线程回调里触发 reload 可能与主线程
   `load_all` 重入并发清空 `self.plugins`；加载全程加互斥锁
 - **全部插件禁用后残留僵尸实例**：`stop_all`（重载/退出路径）停完不

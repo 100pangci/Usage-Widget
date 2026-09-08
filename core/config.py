@@ -14,8 +14,8 @@ DEFAULT_CONFIG: dict = {
         "hidden_sections": [],
     },
     "plugins": {
-        "enabled": ["clock", "opencode_usage", "commandcode", "system_monitor"],
-        "order": ["clock", "opencode_usage", "commandcode", "system_monitor"],
+        "enabled": ["clock", "opencode_usage", "commandcode", "system_monitor", "codex_usage"],
+        "order": ["clock", "opencode_usage", "commandcode", "system_monitor", "codex_usage"],
         "settings": {},
     },
 }

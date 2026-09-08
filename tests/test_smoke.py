@@ -30,7 +30,7 @@ def test_default_config_created():
         cfg = Config(path)
         assert path == str(cfg.path)
         assert cfg.get("window", "opacity") == 0.92
-        assert cfg.get("plugins", "enabled") == ["clock", "opencode_usage", "commandcode", "system_monitor"]
+        assert cfg.get("plugins", "enabled") == ["clock", "opencode_usage", "commandcode", "system_monitor", "codex_usage"]
         cfg.set("window", "opacity", value=0.5)
         cfg.save()
         cfg2 = Config(path)
@@ -43,6 +43,7 @@ def test_discover_clock():
     assert "opencode_usage" in discover_plugin_ids(plugins_dir)
     assert "commandcode" in discover_plugin_ids(plugins_dir)
     assert "system_monitor" in discover_plugin_ids(plugins_dir)
+    assert "codex_usage" in discover_plugin_ids(plugins_dir)
 
 
 def test_import_and_instantiate():
@@ -309,5 +310,3 @@ def test_hidden_sections_restored_on_restart():
         assert visible_ids() == ["clock"], visible_ids()
         assert not win.get_plugin("opencode_usage")._timer.isActive()
         assert win.get_plugin("clock")._timer.isActive()
-
-

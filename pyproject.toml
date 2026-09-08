@@ -17,5 +17,5 @@ dependencies = [
 usage-widget = "main:main"
 
 [tool.setuptools]
-packages = ["core", "ui", "plugins", "plugins.clock", "plugins.opencode_usage", "plugins.commandcode", "plugins.system_monitor", "plugins.system_monitor.collector"]
+packages = ["core", "ui", "plugins", "plugins.clock", "plugins.opencode_usage", "plugins.commandcode", "plugins.system_monitor", "plugins.system_monitor.collector", "plugins.codex_usage"]
 py-modules = ["main"]

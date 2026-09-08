@@ -157,8 +157,8 @@ Windows: `%APPDATA%\usage-widget\config.json`）：
     "position": []
   },
   "plugins": {
-    "enabled": ["clock", "opencode_usage", "commandcode", "system_monitor"],
-    "order": ["clock", "opencode_usage", "commandcode", "system_monitor"],
+    "enabled": ["clock", "opencode_usage", "commandcode", "system_monitor", "codex_usage"],
+    "order": ["clock", "opencode_usage", "commandcode", "system_monitor", "codex_usage"],
     "settings": {}
   }
 }
@@ -166,6 +166,18 @@ Windows: `%APPDATA%\usage-widget\config.json`）：
 
 `window.theme`: `"dark"` / `"light"`；`window.opacity`: 0.3~1.0 背景透明度。
 两者可在右键 →「系统设置」里调整并即时生效。
+
+### Codex 用量插件
+
+右键 →「显示分区」勾选「Codex 用量」，再从右键 →「插件设置」配置认证。
+最简单的方式是在已登录的同一浏览器打开
+`https://chatgpt.com/api/auth/session`，全选复制整段 JSON，粘贴到插件输入框；
+插件会自动提取 `accessToken` 和账户信息。也支持 `chatgpt.com` 请求头里的完整
+Cookie、Netscape/JSON Cookie 文件，以及 Codex CLI 的 `~/.codex/auth.json`。
+代理选择 `auto` 时会依次读取环境变量、系统代理和旧版
+`~/.config/usage-widget/config.toml` 的 `[ui].proxy`。
+认证信息会保存在插件数据目录的 `cookie.txt`（Linux 权限 600），插件显示与
+`codex` 内 `/status` 对应的短周期、每周用量和重置倒计时。
 
 ## 交互
 
@@ -207,6 +219,7 @@ usage-widget/
 │   ├── clock/              # 示例插件：时钟
 │   ├── opencode_usage/     # opencode 用量监控（滚动/每周/每月 + 本月费用）
 │   ├── commandcode/        # commandcode 用量监控（5小时/每周/每月 + credits）
+│   ├── codex_usage/        # Codex CLI 用量监控（短周期/每周 + 重置时间）
 │   └── system_monitor/     # 系统监控（CPU/内存/磁盘 I/O/GPU/网络/开机）
 │       ├── base.py             # 采集编排基类（注册式采集 + 节流 + 环形历史）
 │       ├── collector/          # 采集层：cpu/memory/disk/net/gpu/system（psutil）
