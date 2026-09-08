@@ -2,10 +2,16 @@
 
 ## [Unreleased]
 
-### 变更
+暂无。
+
+## [v1.1.1] - 2026-09-08
+
+### 新增
 
 - 新增 Codex 用量插件：读取 `/api/auth/session` JSON、Cookie 或 Codex `auth.json`，
   显示与 CLI `/status` 对应的短周期/每周用量百分比及重置倒计时；网络请求在后台线程执行
+
+### 变更
 
 - **系统监控插件架构重构（v0.4.0）**：单文件采集器拆分为 `collector/`
   包（cpu/memory/disk/net/gpu/system 按指标域分模块），新增
