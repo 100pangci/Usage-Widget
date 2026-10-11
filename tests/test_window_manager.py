@@ -143,6 +143,83 @@ def test_startup_topmost_off_keeps_main_hidden(tmp_path, app):
     assert win.plugin_ids  # 插件照常挂载
 
 
+def test_topmost_toggle_restores_position(tmp_path, app):
+    """切换 Qt 置顶 flag 重建原生窗口后，位置不能跳到默认位置。"""
+    _, _, win, _ = _make_window(tmp_path)
+    win.show()
+    _pump(app)
+    win.move(37, 53)
+    _pump(app)
+    pos = win.pos()
+
+    win.apply_topmost(False)
+    _pump(app)
+    assert win.pos() == pos
+
+    win.apply_topmost(True)
+    _pump(app)
+    assert win.pos() == pos
+
+
+def test_wayland_topmost_toggle_does_not_remap_window(tmp_path, app, monkeypatch):
+    """Wayland 用 KWin 切换置顶，不能通过 setWindowFlags 触发居中。"""
+    from core import plugin_window
+
+    _, _, win, _ = _make_window(tmp_path)
+    win.show()
+    _pump(app)
+    win.move(37, 53)
+    _pump(app)
+    flags = win.windowFlags()
+    calls = []
+    monkeypatch.setattr(win, "_is_wayland", lambda: True)
+    monkeypatch.setattr(plugin_window, "is_kde_session", lambda: True)
+    monkeypatch.setattr(
+        plugin_window,
+        "set_keepabove",
+        lambda on, window_id, position=None: calls.append(
+            (on, window_id, position)),
+    )
+
+    win.apply_topmost(False)
+
+    assert win.windowFlags() == flags
+    assert calls == [(False, "main", None)]
+    assert win.topmost is False
+
+
+def test_wayland_position_callback_persists_kwin_coordinates(tmp_path, app, monkeypatch):
+    """Wayland 位置必须使用 KWin 回传坐标，而不是 Qt 的 pos()。"""
+    _, _, win, wm = _make_window(tmp_path)
+    monkeypatch.setattr(win, "_is_wayland", lambda: True)
+
+    win._on_kwin_position("main", -123, 77)
+    wm.persist()
+
+    assert win.pos() != win._kwin_position
+    assert win.config.get("windows", "main", "pos") == [-123, 77]
+
+
+def test_wayland_child_positions_are_persisted_by_window_id(
+        tmp_path, app, monkeypatch):
+    """多个独立窗口的 KWin 坐标必须按 window_id 分开保存。"""
+    cfg, mgr, win, wm = _make_window(tmp_path)
+    win._detach_plugin(mgr.plugins["p1"])
+    win._detach_plugin(mgr.plugins["p2"])
+    child_ids = [wid for wid in wm.windows if wid != "main"]
+    assert child_ids == ["w1", "w2"]
+
+    monkeypatch.setattr(win, "_is_wayland", lambda: True)
+    for child in (wm.windows["w1"], wm.windows["w2"]):
+        monkeypatch.setattr(child, "_is_wayland", lambda: True)
+    win._on_kwin_position("w1", -80, 120)
+    win._on_kwin_position("w2", 700, -12)
+    wm.persist()
+
+    assert cfg.get("windows", "w1", "pos") == [-80, 120]
+    assert cfg.get("windows", "w2", "pos") == [700, -12]
+
+
 def test_main_menu_no_duplicate_settings_entry(tmp_path, app):
     """主窗口菜单：只有「插件设置」子菜单，没有基类的单项版。"""
     _, mgr, win, wm = _make_window(tmp_path)
@@ -183,6 +260,20 @@ def test_rebuild_plugin_section_preserves_collapse(tmp_path, app):
     _pump(app)
     assert "p1" in win._container.collapsed_keys()
     assert "p1" in win.plugin_ids
+
+
+def test_rebuild_plugin_section_preserves_order(tmp_path, app):
+    """编辑靠前插件的设置后，单区重建不能把它挪到分区末尾。"""
+    _, mgr, win, _ = _make_window(tmp_path)
+    plugin = mgr.plugins["p1"]
+
+    assert win.plugin_ids == ["p1", "p2"]
+    assert [section.key for section in win._container._sections] == ["p1", "p2"]
+
+    win._rebuild_plugin_section(plugin)
+
+    assert win.plugin_ids == ["p1", "p2"]
+    assert [section.key for section in win._container._sections] == ["p1", "p2"]
 
 
 def test_rebuild_immediately_refreshes_active_plugin(tmp_path, app, monkeypatch):

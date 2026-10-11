@@ -49,6 +49,15 @@ class PluginWindow(QWidget):
         self._manager = None  # WindowManager
         self._user_closing = False
         self._split_done = False  # 拆分幂等标记（WindowManager 置位/复位）
+        # Wayland 下由 KWin 脚本回传的全局坐标；Qt 的 pos() 不是可靠来源。
+        self._kwin_position: tuple[int, int] | None = None
+        if window_id == MAIN_ID:
+            self._topmost = bool(
+                config.get("window", "always_on_top", default=True))
+        else:
+            windows = config.get("windows", default={}) or {}
+            self._topmost = bool(
+                (windows.get(window_id, {}) or {}).get("topmost", True))
 
         # 标题带每窗口唯一的置顶标记（KWin 脚本据此精确匹配本窗口，
         # 见 core.kwin.caption_token）；窗口无边框，标题仅内部使用
@@ -91,7 +100,7 @@ class PluginWindow(QWidget):
     def get_plugin(self, pid: str):
         return self._plugins.get(pid)
 
-    def add_plugin(self, plugin) -> None:
+    def add_plugin(self, plugin, index: int | None = None) -> None:
         """挂载插件：create_widget + start（幂等）。"""
         pid = plugin.id
         if pid in self._plugins:
@@ -101,9 +110,16 @@ class PluginWindow(QWidget):
         except Exception:
             log.exception("插件 %s create_widget 失败", pid)
             return
-        self._plugins[pid] = plugin
+        if index is None:
+            self._plugins[pid] = plugin
+        else:
+            items = list(self._plugins.items())
+            index = max(0, min(index, len(items)))
+            items.insert(index, (pid, plugin))
+            self._plugins.clear()
+            self._plugins.update(items)
         title = plugin.name or pid
-        self._container.add_section(pid, title, widget)
+        self._container.add_section(pid, title, widget, index=index)
         # 「显示分区」菜单隐藏的分区：挂载但不启动 tick（不跑后台监控）
         hidden = set(self.config.get("window", "hidden_sections", default=[]) or [])
         if pid in hidden:
@@ -295,8 +311,9 @@ class PluginWindow(QWidget):
 
         topmost_action = QAction("置顶", self)
         topmost_action.setCheckable(True)
-        topmost_action.setChecked(True)
+        topmost_action.setChecked(self._topmost)
         topmost_action.toggled.connect(self._toggle_topmost)
+        self._topmost_action = topmost_action
         self._menu.addAction(topmost_action)
 
         # 子窗口：简化设置入口（打开第一个插件的对话框）。
@@ -391,8 +408,35 @@ class PluginWindow(QWidget):
     def contextMenuEvent(self, event):
         self._menu.exec(event.globalPos())
 
+    @property
+    def topmost(self) -> bool:
+        """当前置顶状态（Wayland 下不能从 Qt flag 可靠读取）。"""
+        return self._topmost
+
+    def _is_wayland(self) -> bool:
+        return "wayland" in QGuiApplication.platformName()
+
     def apply_topmost(self, on: bool) -> None:
-        """应用置顶状态（切 flag 不跳位 + KDE KWin 脚本），不触发持久化。"""
+        """应用置顶状态，不触发持久化。
+
+        Wayland 下切换 Qt window flag 会销毁并重新映射窗口，KWin 会按
+        默认策略把它放回屏幕中央。KDE 环境由 KWin 脚本直接切换
+        keepAbove，避免重建窗口；X11/Windows 仍通过 Qt flag 切换，并在
+        当前事件循环结束后再次恢复位置以覆盖原生窗口重建的异步时序。
+        """
+        on = bool(on)
+        self._topmost = on
+        action = getattr(self, "_topmost_action", None)
+        if action is not None and action.isChecked() != on:
+            action.blockSignals(True)
+            action.setChecked(on)
+            action.blockSignals(False)
+
+        if self._is_wayland():
+            if is_kde_session():
+                set_keepabove(on, self.window_id, self._kwin_position)
+            return
+
         pos = self.pos()
         flags = self.windowFlags()
         if on:
@@ -401,10 +445,12 @@ class PluginWindow(QWidget):
             flags &= ~Qt.WindowType.WindowStaysOnTopHint
         self.setWindowFlags(flags)
         self.show()
-        if "wayland" not in QGuiApplication.platformName():
-            self.move(pos)
+        self.move(pos)
+        # setWindowFlags() may finish recreating the native window after this
+        # call; repeat the move once the remap has been processed.
+        QTimer.singleShot(0, lambda p=pos: self.move(p))
         if is_kde_session():
-            set_keepabove(on, self.window_id)
+            set_keepabove(on, self.window_id, self._kwin_position)
 
     def _toggle_topmost(self, checked: bool) -> None:
         self.apply_topmost(checked)

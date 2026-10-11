@@ -194,10 +194,11 @@ Cookie、Netscape/JSON Cookie 文件，以及 Codex CLI 的 `~/.codex/auth.json`
   `keepAbove` 属性（等价标题栏「保持在上」按钮），Wayland 下 Qt 的
   `WindowStaysOnTopHint` 被 KWin 忽略时仍能可靠置顶；窗口重建（如
   `setWindowFlags`）后脚本监听 `windowAdded` 自动补设。非 KDE 会话
-  自动回退到 Qt hint。
+  自动回退到 Qt hint。Wayland 下窗口坐标由 KWin 脚本读取并通过会话
+  D-Bus 回传，因此主窗口和独立窗口都支持位置记忆。
 - **Windows / 非 KDE Linux（X11）**：置顶走 Qt `WindowStaysOnTopHint`，
   X11 下位置记忆（`window.position`）正常生效。
-- Wayland 协议限制下程序无法读写窗口位置，位置记忆仅 X11 有效。
+- **非 KDE Wayland**：Wayland 协议不向应用暴露全局窗口坐标，位置记忆仍不可用。
 
 ## 目录结构
 

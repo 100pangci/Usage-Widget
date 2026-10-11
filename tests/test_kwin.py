@@ -63,6 +63,28 @@ def test_script_off_uses_false(kde_env, monkeypatch):
     assert "w.keepAbove = false" in captured["script"]
 
 
+def test_script_restores_position_and_reports_changes(kde_env, monkeypatch):
+    from core import kwin
+
+    captured = {}
+
+    def fake_run(args, timeout=5.0):
+        if "org.kde.kwin.Scripting.loadScript" in args:
+            captured["script"] = Path(args[3]).read_text(encoding="utf-8")
+            return 0, "1"
+        return 0, ""
+
+    monkeypatch.setattr(kwin, "_run_qdbus", fake_run)
+    monkeypatch.setattr(kwin, "_position_listener_registered", True)
+    assert kwin.set_keepabove(True, "w2", position=(-17, 29)) is True
+    script = captured["script"]
+
+    assert "w.frameGeometry = {x: -17, y: 29" in script
+    assert 'callDBus("org.usagewidget.Position"' in script
+    assert '"updateWindowPosition"' in script
+    assert "frameGeometryChanged.connect" in script
+
+
 def test_set_keepabove_noop_without_kde(monkeypatch):
     monkeypatch.delenv("KDE_FULL_SESSION", raising=False)
     monkeypatch.delenv("KDE_SESSION_VERSION", raising=False)

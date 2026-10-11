@@ -10,11 +10,22 @@
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
+
+from core.kwin import is_kde_session, set_keepabove
 
 log = logging.getLogger("usage-widget.window_manager")
 
 MAIN_ID = "main"
+
+
+def _position(value) -> tuple[int, int] | None:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None
+    try:
+        return int(value[0]), int(value[1])
+    except (TypeError, ValueError):
+        return None
 
 
 class WindowManager:
@@ -182,6 +193,7 @@ class WindowManager:
             win.setWindowFlags(
                 win.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
             win.show()
+            self._schedule_kwin_sync(wid, win)
         return wid
 
     # ---- 启动恢复 ----
@@ -222,14 +234,17 @@ class WindowManager:
         # 3. 恢复各窗口位置/置顶
         for wid, win in self.windows.items():
             wc = windows_cfg.get(wid, {})
-            pos = wc.get("pos")
-            if pos and len(pos) == 2 and wid != MAIN_ID:
-                win.move(int(pos[0]), int(pos[1]))
+            pos = _position(wc.get("pos"))
+            if pos is not None and wid != MAIN_ID:
+                win._kwin_position = pos
+                if not win._is_wayland():
+                    win.move(*pos)
             if wid != MAIN_ID:
                 # 窗口默认带置顶 flag，只需恢复持久化为 False 的
                 if wc.get("topmost") is False:
                     win.apply_topmost(False)
                 win.show()
+                self._schedule_kwin_sync(wid, win)
                 # 已拆过标记复位（窗口集已重建）
                 win._split_done = False
         self.persist()
@@ -243,21 +258,62 @@ class WindowManager:
                 return
         raise NotImplementedError
 
+    def _schedule_kwin_sync(self, window_id: str, win) -> None:
+        if not is_kde_session() or not win._is_wayland():
+            return
+        self._wait_for_kwin_mapping(window_id, win)
+
+    def _wait_for_kwin_mapping(
+            self, window_id: str, win, attempts: int = 0) -> None:
+        if self.windows.get(window_id) is not win or not win.isVisible():
+            return
+        handle = win.windowHandle()
+        if handle is not None and handle.isExposed():
+            QTimer.singleShot(
+                100, lambda: self._sync_kwin_window(window_id, win))
+        elif attempts < 50:
+            QTimer.singleShot(
+                100,
+                lambda: self._wait_for_kwin_mapping(
+                    window_id, win, attempts + 1),
+            )
+
+    def _sync_kwin_window(self, window_id: str, win) -> None:
+        # 子窗口可能在 800ms 延迟期间被关闭，避免重新加载一个孤儿脚本。
+        if self.windows.get(window_id) is not win or not win.isVisible():
+            return
+        set_keepabove(
+            win.topmost,
+            window_id,
+            getattr(win, "_kwin_position", None),
+        )
+
     # ---- 配置 ----
 
     def persist(self) -> None:
         """唯一写配置入口：持久化所有窗口状态。"""
         windows = {}
         for wid, win in self.windows.items():
-            topmost = True
-            try:
-                topmost = bool(win.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
-            except Exception:
-                pass
+            topmost = getattr(win, "topmost", None)
+            if topmost is None:
+                topmost = True
+                try:
+                    topmost = bool(
+                        win.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
+                except Exception:
+                    pass
+            if getattr(win, "_is_wayland", lambda: False)():
+                pos = _position(getattr(win, "_kwin_position", None))
+                if pos is None:
+                    # KWin 回传可能尚未到达，不能用 Qt 的伪坐标覆盖
+                    # 上一次已保存的位置。
+                    pos = _position(self.config.get("windows", wid, "pos"))
+            else:
+                pos = (win.x(), win.y())
             windows[wid] = {
                 "plugins": win.plugin_ids,
-                "pos": [win.x(), win.y()],
-                "topmost": topmost,
+                "pos": list(pos or (0, 0)),
+                "topmost": bool(topmost),
             }
         self.config.set("windows", value=windows)
         self.config.save()

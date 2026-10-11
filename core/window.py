@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QMenu
 import core.theme as theme
 from core.kwin import (
     is_kde_session,
+    register_position_listener,
     script_name,
     set_keepabove,
     unload_keepabove_script,
@@ -50,9 +51,13 @@ class FloatingWindow(PluginWindow):
         self.window_manager.create_main(self)  # 注册自己为主窗口
         self.window_manager.set_refresh_callback(self._on_window_layout_changed)
         self.bind_manager(self.window_manager)
-        self.window_manager.restore()
-
+        self._position_save_timer = QTimer(self)
+        self._position_save_timer.setSingleShot(True)
+        self._position_save_timer.setInterval(150)
+        self._position_save_timer.timeout.connect(self.window_manager.persist)
+        register_position_listener(self._on_kwin_position)
         self._apply_saved_position()
+        self.window_manager.restore()
         self._build_main_menu()
         self._refresh_all_merge_targets()
 
@@ -61,9 +66,23 @@ class FloatingWindow(PluginWindow):
             # show()，把空主窗口（全部插件已分离）也弹出来
             self.setWindowFlags(
                 self.windowFlags() & ~Qt.WindowType.WindowStaysOnTopHint)
-        elif is_kde_session():
+
+    def showEvent(self, event) -> None:
+        """窗口真正请求映射后，再让 KWin 恢复 Wayland 全局坐标。"""
+        super().showEvent(event)
+        if is_kde_session() and self._is_wayland():
+            self._wait_for_kwin_mapping()
+
+    def _wait_for_kwin_mapping(self, attempts: int = 0) -> None:
+        """等待 Wayland surface 被 KWin 接管，避免恢复坐标被初始放置覆盖。"""
+        if not self.isVisible():
+            return
+        handle = self.windowHandle()
+        if handle is not None and handle.isExposed():
+            QTimer.singleShot(100, self._sync_kwin_position)
+        elif attempts < 50:
             QTimer.singleShot(
-                800, lambda: set_keepabove(True, MAIN_ID))
+                100, lambda: self._wait_for_kwin_mapping(attempts + 1))
 
     def _on_window_layout_changed(self) -> None:
         """窗口/插件分配变化：刷新所有窗口的合并目标 + 主窗口菜单。"""
@@ -196,11 +215,15 @@ class FloatingWindow(PluginWindow):
             self._rebuild_plugin_section(plugin)
 
     def _rebuild_plugin_section(self, plugin) -> None:
-        """只重建该插件自己的分区：分离→挂载→恢复折叠/隐藏状态。"""
+        """只重建该插件自己的分区，并保留原顺序、折叠与隐藏状态。"""
+        try:
+            index = self.plugin_ids.index(plugin.id)
+        except ValueError:
+            index = None
         hidden = set(self.config.get("window", "hidden_sections", default=[]) or [])
         collapsed = set(self._container.collapsed_keys())
         self.remove_plugin(plugin.id)
-        self.add_plugin(plugin)
+        self.add_plugin(plugin, index=index)
         if plugin.id in collapsed:
             self._container.collapse_section(plugin.id)
         if plugin.id in hidden:
@@ -289,24 +312,36 @@ class FloatingWindow(PluginWindow):
             subprocess.Popen(["xdg-open", str(path)])
 
     def _toggle_topmost(self, checked: bool = True) -> None:
-        pos = self.pos()
-        flags = self.windowFlags()
-        if checked:
-            flags |= Qt.WindowType.WindowStaysOnTopHint
-        else:
-            flags &= ~Qt.WindowType.WindowStaysOnTopHint
-        self.setWindowFlags(flags)
-        self.show()
-        if not self._is_wayland():
-            self.move(pos)
+        self.apply_topmost(checked)
         self.config.set("window", "always_on_top", value=bool(checked))
         self.config.save()
-        set_keepabove(bool(checked), self.window_id)
 
     def _apply_saved_position(self) -> None:
         pos = self.config.get("window", "position", default=[])
-        if pos and len(pos) == 2 and not self._is_wayland():
-            self.move(int(pos[0]), int(pos[1]))
+        if not isinstance(pos, (list, tuple)) or len(pos) != 2:
+            pos = self.config.get("windows", MAIN_ID, "pos", default=[])
+        if not isinstance(pos, (list, tuple)) or len(pos) != 2:
+            return
+        try:
+            position = (int(pos[0]), int(pos[1]))
+        except (TypeError, ValueError):
+            return
+        self._kwin_position = position
+        if not self._is_wayland():
+            self.move(*position)
+
+    def _on_kwin_position(self, window_id: str, x: int, y: int) -> None:
+        """接收 KWin 的实际全局坐标，并合并短时间内的连续拖动事件。"""
+        window = self.window_manager.windows.get(window_id)
+        if window is None:
+            return
+        window._kwin_position = (int(x), int(y))
+        self._position_save_timer.start()
+
+    def _sync_kwin_position(self) -> None:
+        """让 KWin 在窗口已映射后恢复坐标，并开始回传移动事件。"""
+        if is_kde_session():
+            set_keepabove(self.topmost, MAIN_ID, self._kwin_position)
 
     def _is_wayland(self) -> bool:
         return "wayland" in QGuiApplication.platformName()
@@ -323,9 +358,16 @@ class FloatingWindow(PluginWindow):
             app.quit()
 
     def closeEvent(self, event):
-        if not self._is_wayland():
-            self.config.set("window", "position", value=[self.x(), self.y()])
-            self.config.save()
+        if self._is_wayland():
+            position = self._kwin_position
+        else:
+            position = (self.x(), self.y())
+        if position is not None:
+            self.config.set("window", "position", value=list(position))
+        # 退出时子窗口可能还有尚未触发防抖定时器的 KWin 回传，统一
+        # 从各窗口自己的缓存写一次，避免最后一次移动丢失。
+        self.window_manager.persist()
+        self.config.save()
         unload_keepabove_script(script_name(self.window_id))
         # 退出时给后台线程 2.5s 收尾
         self.manager.stop_all(grace_ms=2500)

@@ -107,11 +107,16 @@ class SectionsContainer(QWidget):
             QRectF(0.5, 0.5, self.width() - 1, self.height() - 1), 12, 12)
         p.end()
 
-    def add_section(self, key: str, title: str, content: QWidget) -> Section:
+    def add_section(
+            self, key: str, title: str, content: QWidget,
+            index: int | None = None) -> Section:
         section = Section(key, title, content, self)
         section.collapsed_changed.connect(self.layout_changed.emit)
-        self._lay.insertWidget(self._lay.count() - 1, section)
-        self._sections.append(section)
+        if index is None:
+            index = len(self._sections)
+        index = max(0, min(index, len(self._sections)))
+        self._lay.insertWidget(index, section)
+        self._sections.insert(index, section)
         return section
 
     def section_visibility(self) -> dict[str, bool]:
