@@ -198,13 +198,21 @@ def test_reload_no_clipped_labels():
     from PySide6.QtWidgets import QApplication, QLabel
 
     from core.config import Config
-    from core.plugin_manager import PluginManager
+    from core.plugin_manager import PluginManager, discover_plugin_ids
     from core.window import FloatingWindow
 
     app = QApplication.instance() or QApplication([])
     with tempfile.TemporaryDirectory() as d:
         cfg = Config(os.path.join(d, "config.json"))
         mgr = PluginManager(cfg)
+        # This is a layout test, not a live integration test. Keep network-backed
+        # plugins disabled so it cannot start real QThreads from the user's
+        # ~/.usage-widget/plugin settings during the test. Record every plugin
+        # in order: PluginManager treats ids missing from order as newly added
+        # plugins and auto-enables them.
+        cfg.set("plugins", "enabled", value=["clock"])
+        cfg.set("plugins", "order", value=discover_plugin_ids(mgr.plugins_dir))
+        cfg.save()
         mgr.load_all()
         win = FloatingWindow(cfg, mgr)
         win.populate_sections()
@@ -226,6 +234,9 @@ def test_reload_no_clipped_labels():
         assert clipped() == 0
         # 窗口高度与 reload 前一致（内容相同则尺寸应不变）
         assert win.height() > 0
+        mgr.stop_all()
+        win.close()
+        app.processEvents()
 
 
 def test_theme_switching():
