@@ -1,17 +1,22 @@
 """Codex 用量插件测试：认证文本、/status 响应和基础插件行为。"""
+import json
 import os
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from plugins.codex_usage.api import (
     CodexAuth,
     CodexClient,
+    CodexError,
     CodexUsage,
     UsageWindow,
     parse_auth_text,
     parse_usage_response,
+    serialize_auth,
 )
 from plugins.codex_usage.format import format_plan_name, format_reset_time
 from plugins.codex_usage.plugin import CodexUsagePlugin
@@ -62,6 +67,65 @@ def test_parse_standalone_access_token():
     assert auth == CodexAuth("", "a-standalone-access-token", "")
 
 
+def test_parse_standalone_token_with_bearer_prefix():
+    auth = parse_auth_text("Bearer a-standalone-access-token")
+    assert auth == CodexAuth("", "a-standalone-access-token", "")
+
+
+def test_truncated_session_json_is_not_sent_as_token():
+    """session JSON 超过 32767 字符被截断后解析失败，整段文本（含中文等
+    非 ASCII 字符）不能当成 Bearer token 发送。
+
+    回归：设置框曾用 QLineEdit（默认上限 32767 字符）静默截断粘贴内容，
+    截断后的 JSON 解析失败又落入「直接粘贴 token」兜底，导致请求头
+    编码报 latin-1 错误。
+    """
+    payload = (
+        '{"user":{"name":"测试用户","email":"u@example.com"},'
+        '"mappedEventName":"purple_zinc","data":"' + "a" * 40000 + '"}'
+    )
+    truncated = payload[:32767]
+    assert not parse_auth_text(truncated).configured
+
+
+def test_session_json_with_cjk_still_parses():
+    payload = json.dumps({
+        "user": {"name": "测试用户"},
+        "accessToken": "tk-" + "a" * 5000,
+        "mappedEventName": "purple_zinc",
+    }, ensure_ascii=False)
+    auth = parse_auth_text(payload)
+    assert auth.bearer_token == "tk-" + "a" * 5000
+
+
+def test_serialize_auth_keeps_only_needed_fields():
+    auth = parse_auth_text(json.dumps({
+        "user": {"name": "测试用户"},
+        "accessToken": "tk-" + "a" * 100,
+        "accountId": "acct-1",
+        "mappedEventName": "purple_zinc",
+    }, ensure_ascii=False))
+    compact = serialize_auth(auth)
+    assert "测试用户" not in compact
+    assert "mappedEventName" not in compact
+    restored = parse_auth_text(compact)
+    # 有 Bearer 时 Cookie 本就不会参与请求，不必保留
+    assert restored.bearer_token == auth.bearer_token
+    assert restored.account_id == auth.account_id
+
+
+def test_client_reports_unencodable_auth_as_friendly_error():
+    class Opener:
+        def open(self, request, timeout):
+            raise UnicodeEncodeError(
+                "latin-1", "value", 2789, 2791, "ordinal not in range(256)")
+
+    client = CodexClient(cookie_text="session=abc", proxy="none")
+    client._opener = Opener()
+    with pytest.raises(CodexError, match="重新粘贴"):
+        client.usage()
+
+
 def test_detect_proxy_from_environment(monkeypatch):
     for key in proxy_module._ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
@@ -72,6 +136,9 @@ def test_detect_proxy_from_environment(monkeypatch):
 def test_detect_proxy_from_legacy_config(tmp_path, monkeypatch):
     for key in proxy_module._ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
+    # 隔离本机系统代理（Windows 注册表 / KDE 配置），只测试旧版项目配置分支
+    monkeypatch.setattr(proxy_module, "_win_registry_proxy", lambda: None)
+    monkeypatch.setattr(proxy_module, "_kde_proxy", lambda: None)
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         '[ui]\nproxy = "http://127.0.0.1:10808"\n', encoding="utf-8")
@@ -222,3 +289,70 @@ def test_widget_matches_usage_style_and_updates_reset_label():
     assert plugin._labels["secondary_pct"].text() == "7%"
     widget.deleteLater()
     assert app is not None
+
+
+def test_settings_dialog_filters_pasted_json():
+    """粘贴完整 session JSON 后输入框只保留必要字段；超过 32767 字符的
+    accessToken 不会被截断。"""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from plugins.codex_usage.settings_dialog import SettingsDialog
+
+    app = QApplication.instance() or QApplication([])
+    plugin = CodexUsagePlugin({})
+    dialog = SettingsDialog(plugin, None)
+    token = "tk-" + "a" * 40000
+    payload = json.dumps({
+        "user": {"name": "测试用户"},
+        "accessToken": token,
+        "mappedEventName": "purple_zinc",
+    }, ensure_ascii=False)
+    dialog._fill_from_text(payload)
+    compact = dialog._cookie_edit.toPlainText()
+    assert "测试用户" not in compact
+    assert "mappedEventName" not in compact
+    assert parse_auth_text(compact).bearer_token == token
+    dialog.deleteLater()
+    assert app is not None
+
+
+def test_settings_dialog_saves_only_necessary_fields(tmp_path, monkeypatch):
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from plugins.codex_usage.settings_dialog import SettingsDialog
+
+    app = QApplication.instance() or QApplication([])
+    plugin = CodexUsagePlugin({"data_dir": tmp_path})
+    monkeypatch.setattr(plugin, "refresh_now", lambda: None)
+    dialog = SettingsDialog(plugin, None)
+    cookie_path = tmp_path / "cookie.txt"
+    dialog._cookie_path_edit.setText(str(cookie_path))
+    token = "tk-" + "a" * 5000
+    dialog._cookie_edit.setPlainText(json.dumps({
+        "user": {"name": "测试用户"},
+        "accessToken": token,
+        "sessionToken": "session-token-xyz",
+    }, ensure_ascii=False))
+    dialog._save()
+    saved = cookie_path.read_text(encoding="utf-8")
+    assert "测试用户" not in saved
+    assert "sessionToken" not in saved
+    assert len(saved) < 6000
+    auth = parse_auth_text(saved)
+    assert auth.bearer_token == token
+    dialog.deleteLater()
+    assert app is not None
+
+
+def test_settings_dialog_rejects_truncated_json():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from plugins.codex_usage.settings_dialog import SettingsDialog
+
+    QApplication.instance() or QApplication([])
+    truncated = '{"user":{"name":"测试用户"}, "data":"' + "a" * 40000
+    with pytest.raises(CodexError, match="不完整"):
+        SettingsDialog._validate_auth(truncated)

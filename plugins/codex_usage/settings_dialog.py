@@ -1,6 +1,7 @@
 """Codex 用量插件设置：Cookie、账户 ID、代理和刷新间隔。"""
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -13,13 +14,14 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
-from .api import CodexClient, CodexError, parse_auth_text
+from .api import CodexClient, CodexError, parse_auth_text, serialize_auth
 
 
 class _TaskThread(QThread):
@@ -44,10 +46,14 @@ class SettingsDialog(QDialog):
         self.setMinimumWidth(500)
         self._task = None
 
-        self._cookie_edit = QLineEdit()
-        self._cookie_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        # 用多行文本框而不是 QLineEdit：QLineEdit 默认最多 32767 字符，
+        # /api/auth/session 的完整 JSON 已超过该长度，会被静默截断成非法 JSON。
+        self._cookie_edit = QPlainTextEdit()
         self._cookie_edit.setPlaceholderText(
-            "粘贴 /api/auth/session 完整 JSON、Cookie、access token 或 auth.json")
+            "粘贴 /api/auth/session 完整 JSON、Cookie、access token 或 auth.json"
+            "（保存时自动只保留必要字段）")
+        self._cookie_edit.setFixedHeight(84)
+        self._cookie_edit.setTabChangesFocus(True)
         self._cookie_from_clip = QPushButton("从剪贴板")
         self._cookie_from_clip.clicked.connect(self._cookie_from_clipboard)
         self._cookie_from_file = QPushButton("从文件读取")
@@ -56,13 +62,14 @@ class SettingsDialog(QDialog):
         cookie_lay = QHBoxLayout(cookie_row)
         cookie_lay.setContentsMargins(0, 0, 0, 0)
         cookie_lay.addWidget(self._cookie_edit, 1)
-        cookie_lay.addWidget(self._cookie_from_clip)
-        cookie_lay.addWidget(self._cookie_from_file)
+        cookie_lay.addWidget(self._cookie_from_clip, 0, Qt.AlignmentFlag.AlignTop)
+        cookie_lay.addWidget(self._cookie_from_file, 0, Qt.AlignmentFlag.AlignTop)
 
         self._cookie_path_edit = QLineEdit(str(plugin.settings["cookie_path"]))
         self._cookie_hint = QLabel(
             "推荐：登录 chatgpt.com 后打开 /api/auth/session，全选复制整段 JSON；"
-            "插件会自动提取 accessToken。auto 代理会读取系统/项目配置；认证信息"
+            "插件会自动提取 accessToken，写盘时只保留必要字段（完整 JSON 里的"
+            "user、实验开关等都会丢弃）。auto 代理会读取系统/项目配置；认证信息"
             "只保存在本机此文件（权限 600）。")
         self._cookie_hint.setWordWrap(True)
         self._cookie_hint.setStyleSheet("color: #9aa3b5; font-size: 11px;")
@@ -116,12 +123,31 @@ class SettingsDialog(QDialog):
         if path.is_file():
             self._cookie_edit.setPlaceholderText("已配置 Cookie；粘贴新值可替换")
 
+    @staticmethod
+    def _validate_auth(text: str):
+        """解析认证文本；失败时给出可操作的中文错误。"""
+        auth = parse_auth_text(text)
+        if auth.configured:
+            return auth
+        if text.lstrip().startswith(("{", "[")):
+            try:
+                json.loads(text)
+            except (json.JSONDecodeError, TypeError):
+                raise CodexError(
+                    "粘贴的 JSON 不完整或格式错误（内容可能被截断）："
+                    "请重新复制完整的 /api/auth/session JSON") from None
+            raise CodexError("JSON 中未找到 accessToken 或 Cookie：请确认复制的是完整会话内容")
+        raise CodexError("Cookie/token 格式无法识别")
+
     def _fill_from_text(self, text: str):
         text = text.strip()
         if not text:
             return
-        self._cookie_edit.setText(text)
         auth = parse_auth_text(text)
+        if auth.configured:
+            # 粘贴的是完整 session JSON 时，立即精简成只含必要字段的形式。
+            text = serialize_auth(auth)
+        self._cookie_edit.setPlainText(text)
         if auth.account_id and not self._account_edit.text().strip():
             self._account_edit.setText(auth.account_id)
 
@@ -153,9 +179,9 @@ class SettingsDialog(QDialog):
 
     def _make_client(self):
         path = self._cookie_path_edit.text().strip()
-        text = self._cookie_edit.text().strip()
-        if text and not parse_auth_text(text).configured:
-            raise CodexError("Cookie/token 格式无法识别")
+        text = self._cookie_edit.toPlainText().strip()
+        if text:
+            self._validate_auth(text)
         if not text and not Path(path).expanduser().is_file():
             raise CodexError("请先粘贴 Cookie，或选择已有 Cookie 文件")
         return CodexClient(
@@ -195,10 +221,15 @@ class SettingsDialog(QDialog):
         if not path_text:
             self._test_label.setText("Cookie 保存路径不能为空")
             return
-        cookie_text = self._cookie_edit.text().strip()
-        if cookie_text and not parse_auth_text(cookie_text).configured:
-            self._test_label.setText("Cookie/token 格式无法识别")
-            return
+        cookie_text = self._cookie_edit.toPlainText().strip()
+        if cookie_text:
+            try:
+                # 只把必要字段写盘：完整 session JSON 几十 KB，没必要落盘。
+                cookie_text = serialize_auth(self._validate_auth(cookie_text))
+            except CodexError as e:
+                self._test_label.setText(str(e))
+                return
+            self._cookie_edit.setPlainText(cookie_text)
         try:
             path = Path(path_text).expanduser()
             if cookie_text:

@@ -203,6 +203,24 @@ def _token_from_pairs(pairs: list[tuple[str, str]]) -> str:
     return ""
 
 
+def _standalone_bearer(text: str) -> str:
+    """识别直接粘贴的 access token（可带 Bearer 前缀）。
+
+    只有单行、不含 Cookie/JSON 结构的文本才算 token。被截断的
+    session JSON 会解析失败并落到这里，必须拒绝，否则整段文本会被
+    当认证头发送（其中非 ASCII 字符会让请求以 UnicodeEncodeError
+    失败）。
+    """
+    if "=" in text or "\t" in text:
+        return ""
+    token = re.sub(r"(?i)^bearer\s+", "", text).strip()
+    if not token or token.startswith(("{", "[")):
+        return ""
+    if re.search(r"\s", token):
+        return ""
+    return token
+
+
 def parse_auth_text(text: str) -> CodexAuth:
     """解析 Cookie header、Netscape/JSON Cookie 导出或 Codex auth.json。
 
@@ -247,12 +265,30 @@ def parse_auth_text(text: str) -> CodexAuth:
     if not pairs:
         pairs = _raw_cookie_pairs(text)
     bearer = _token_from_pairs(pairs)
-    # 允许用户直接把 access token 粘进设置框。
-    if not pairs and "=" not in text and "\t" not in text:
-        bearer = text
+    if not pairs:
+        # 允许用户直接把 access token 粘进设置框；但拒绝含空白或
+        # JSON 结构的文本（常见于被截断的 session JSON）。
+        bearer = _standalone_bearer(text)
     account_id = _account_id_from_value(_decode_jwt_payload(bearer))
     cookie = "; ".join(f"{name}={value}" for name, value in pairs)
     return CodexAuth(cookie, bearer, account_id)
+
+
+def serialize_auth(auth: CodexAuth) -> str:
+    """把认证信息压缩成只含必要字段的 JSON，供设置对话框写盘。
+
+    完整粘贴的 /api/auth/session JSON 有几十 KB（user、实验开关等字段
+    与本插件无关，且会撑爆配置文件/输入控件）；这里只保留 accessToken
+    或 Cookie 以及账户 ID，解析回来语义不变。
+    """
+    payload: dict[str, str] = {}
+    if auth.bearer_token:
+        payload["accessToken"] = auth.bearer_token
+    elif auth.cookie_header:
+        payload["cookie"] = auth.cookie_header
+    if auth.account_id:
+        payload["accountId"] = auth.account_id
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def read_auth_file(path: str | Path) -> CodexAuth:
@@ -263,7 +299,7 @@ def read_auth_file(path: str | Path) -> CodexAuth:
         raise CodexError(f"读取 Cookie 文件失败：{e}") from e
     auth = parse_auth_text(text)
     if not auth.configured:
-        raise CodexError("Cookie 文件为空或格式无法识别")
+        raise CodexError("Cookie 文件为空或格式无法识别：请在插件设置中重新粘贴完整 JSON")
     return auth
 
 
@@ -462,7 +498,7 @@ class CodexClient:
         else:
             auth = CodexAuth()
         if not auth.configured:
-            raise CodexError("未配置 Cookie：请在插件设置中填写")
+            raise CodexError("Cookie 内容为空或无法识别：请在插件设置中重新粘贴")
         return CodexAuth(
             auth.cookie_header,
             auth.bearer_token,
@@ -524,6 +560,12 @@ class CodexClient:
                 raise CodexError(f"用量接口 HTTP {e.code}") from e
             except CodexError:
                 raise
+            except UnicodeEncodeError as e:
+                # 请求头只能携带 latin-1 字符；出现这种错误说明 Cookie/token
+                # 内容异常（常见于粘贴被截断），给出可操作的提示而不是原始异常。
+                raise CodexError(
+                    "认证信息包含无法发送的字符（粘贴内容可能被截断）："
+                    "请在插件设置中重新粘贴完整 JSON") from e
             except (urllib.error.URLError, TimeoutError, OSError) as e:
                 raise CodexError(f"请求用量失败：{e}") from e
 
