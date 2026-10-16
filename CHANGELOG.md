@@ -4,6 +4,23 @@
 
 暂无。
 
+## [v1.2.1] - 2026-10-16
+
+### 修复
+
+- **Codex 用量插件粘贴长 JSON 报 latin-1 错误**：设置框原为 QLineEdit（默认上限
+  32767 字符），当 `/api/auth/session` 的完整 JSON 超过该长度时被静默截断；
+  截断后的 JSON 解析失败又落入「直接粘贴 token」兜底，整段文本被当作 Bearer
+  token 发送，请求头编码时报 `'latin-1' codec can't encode characters`。现改为
+  多行文本框接收完整粘贴，并自动精简：解析后只把 accessToken/Cookie 与账户 ID
+  写盘（完整 JSON 里的 user、实验开关等字段不再保存）；截断/无法识别的文本
+  不再当作 token，发送头含非法字符时给出可操作的中文提示
+
+### 测试
+
+- Codex 用量新增回归测试：截断的 session JSON 不再被当作 token、写盘只保留
+  必要字段、超长 accessToken 粘贴不被截断；旧版代理配置测试隔离本机系统代理
+
 ## [v1.2.0] - 2026-10-14
 
 ### 新增
