@@ -19,10 +19,15 @@ from core.kwin import (
     set_keepabove,
     unload_keepabove_script,
 )
-from core.window_manager import MAIN_ID
+from core.window_manager import MAIN_ID, clamp_to_screens
 from ui.sections import SectionsContainer
 
 log = logging.getLogger("usage-widget.plugin_window")
+
+# 手动拖动时单次事件允许的最大位移。跨屏（尤其混合 DPI）拖动时
+# Qt 的全局坐标在屏幕边界会跳变一个屏幕宽度，远超真实鼠标位移；
+# 超过该阈值视为坐标跳变而不是拖动。
+_MAX_MANUAL_DRAG_STEP = 1000
 
 PANEL_STYLE = """
 #panel QLabel { color: %(text)s; }
@@ -45,6 +50,7 @@ class PluginWindow(QWidget):
         self.config = config
         self._plugins: dict[str, object] = {}
         self._drag_pos: QPoint | None = None
+        self._system_move_unsupported = False
         self._targets: list[tuple[str, str]] = []
         self._manager = None  # WindowManager
         self._user_closing = False
@@ -283,20 +289,78 @@ class PluginWindow(QWidget):
             event.buttons() & Qt.MouseButton.LeftButton
         ):
             return
-        delta = event.globalPosition().toPoint() - self._drag_pos
-        if delta.manhattanLength() > 4:
-            if "wayland" in QGuiApplication.platformName():
-                win = self.windowHandle()
-                if win is not None and win.startSystemMove():
-                    self._drag_pos = None
-            else:
-                self.move(self.pos() + delta)
-                self._drag_pos = event.globalPosition().toPoint()
+        cursor = event.globalPosition().toPoint()
+        if (cursor - self._drag_pos).manhattanLength() <= 4:
+            return
+        if self._start_system_move():
+            self._drag_pos = None
+        else:
+            self._manual_drag(cursor)
         super().mouseMoveEvent(event)
+
+    def _start_system_move(self) -> bool:
+        """把拖动交给系统/窗口管理器（原生拖动）。
+
+        跨屏拖动时 Qt 的全局坐标在屏幕边界不连续（混合 DPI 下尤其
+        明显），手动 move(pos()+delta) 会瞬时算出接近屏幕宽度的跳变，
+        把窗口甩出所有屏幕。原生拖动由系统按鼠标抓取点移动窗口，
+        跨屏和 DPI 切换都由系统处理，窗口始终跟着鼠标。
+        """
+        if self._system_move_unsupported:
+            return False
+        platform = QGuiApplication.platformName().lower()
+        if not (platform.startswith("windows") or "wayland" in platform):
+            # X11/macOS 全局坐标连续，手动 move 可靠；保持原有行为，
+            # 避免在不支持的窗口管理器上把拖动交给系统后失效。
+            self._system_move_unsupported = True
+            return False
+        handle = self.windowHandle()
+        if handle is None:
+            return False
+        try:
+            ok = bool(handle.startSystemMove())
+        except Exception:
+            ok = False
+        if not ok:
+            # 平台不支持：本次及后续拖动都走手动 move 兜底
+            self._system_move_unsupported = True
+        return ok
+
+    def _manual_drag(self, cursor: QPoint) -> None:
+        """手动移动窗口（不支持原生拖动的平台兜底）。"""
+        delta = cursor - self._drag_pos
+        if delta.manhattanLength() > _MAX_MANUAL_DRAG_STEP:
+            # 全局坐标在两个屏幕之间发生跳变，不是真实的鼠标位移。
+            # 继续累加会把窗口甩出桌面：结束本次拖动，窗口留在原地，
+            # 用户松开后可在当前屏幕重新拖动。
+            log.debug("窗口 %s 拖动坐标跳变 %s，结束本次拖动",
+                      self.window_id, delta.toTuple())
+            self._drag_pos = None
+            return
+        self.move(self.pos() + delta)
+        self._drag_pos = cursor
 
     def mouseReleaseEvent(self, event):
         self._drag_pos = None
+        self.ensure_on_screen()
         super().mouseReleaseEvent(event)
+
+    def ensure_on_screen(self) -> None:
+        """窗口完全落在所有屏幕外时拉回最近的屏幕，避免窗口失联。
+
+        位置恢复（旧配置里可能保存过出屏坐标）与拖动结束后调用。
+        Wayland 下客户端无法定位窗口，由 KWin 脚本回传坐标，不处理。
+        """
+        if self._is_wayland():
+            return
+        screens = [screen.availableGeometry()
+                   for screen in QGuiApplication.screens()]
+        pos = clamp_to_screens(self.frameGeometry(), screens)
+        if pos is None:
+            return
+        log.warning("窗口 %s 位于屏幕外 (%d,%d)，拉回 (%d,%d)",
+                    self.window_id, self.x(), self.y(), pos.x(), pos.y())
+        self.move(pos)
 
     # ---- 右键菜单 ----
 

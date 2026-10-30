@@ -10,7 +10,7 @@
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QPoint, QRect, QTimer, Qt
 
 from core.kwin import is_kde_session, set_keepabove
 
@@ -26,6 +26,41 @@ def _position(value) -> tuple[int, int] | None:
         return int(value[0]), int(value[1])
     except (TypeError, ValueError):
         return None
+
+
+def clamp_to_screens(
+        rect: QRect, screens: list[QRect], margin: int = 8) -> QPoint | None:
+    """把完全落在所有屏幕之外的窗口矩形拉回最近的屏幕。
+
+    返回修正后的左上角；矩形与任一屏幕相交时返回 None（无需修正）。
+    双屏（尤其混合 DPI）下 Qt 的全局坐标在屏幕边界不连续，拖动或
+    恢复位置时窗口可能被甩到所有屏幕之外——进程仍在运行，但用户
+    在哪个屏幕都找不到窗口。
+    """
+    if not screens:
+        return None
+    if any(screen.intersects(rect) for screen in screens):
+        return None
+
+    def gap2(screen: QRect) -> int:
+        dx = max(screen.left() - rect.right(),
+                 rect.left() - screen.right(), 0)
+        dy = max(screen.top() - rect.bottom(),
+                 rect.top() - screen.bottom(), 0)
+        return dx * dx + dy * dy
+
+    target = min(screens, key=gap2)
+    if rect.width() + 2 * margin <= target.width():
+        x = min(max(rect.left(), target.left() + margin),
+                target.right() - margin - rect.width() + 1)
+    else:
+        x = target.left() + margin
+    if rect.height() + 2 * margin <= target.height():
+        y = min(max(rect.top(), target.top() + margin),
+                target.bottom() - margin - rect.height() + 1)
+    else:
+        y = target.top() + margin
+    return QPoint(int(x), int(y))
 
 
 class WindowManager:
@@ -244,6 +279,7 @@ class WindowManager:
                 if wc.get("topmost") is False:
                     win.apply_topmost(False)
                 win.show()
+                win.ensure_on_screen()
                 self._schedule_kwin_sync(wid, win)
                 # 已拆过标记复位（窗口集已重建）
                 win._split_done = False

@@ -261,6 +261,7 @@ class FloatingWindow(PluginWindow):
         if pos and len(pos) == 2:
             win.move(int(pos[0]), int(pos[1]))
         win.show()
+        win.ensure_on_screen()
         # 更新其他窗口的合并目标
         self._refresh_all_merge_targets()
         wm.persist()
@@ -329,6 +330,8 @@ class FloatingWindow(PluginWindow):
         self._kwin_position = position
         if not self._is_wayland():
             self.move(*position)
+            # 旧配置可能保存过出屏坐标（跨屏拖动 bug），恢复时拉回可见区域
+            self.ensure_on_screen()
 
     def _on_kwin_position(self, window_id: str, x: int, y: int) -> None:
         """接收 KWin 的实际全局坐标，并合并短时间内的连续拖动事件。"""

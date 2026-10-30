@@ -161,6 +161,170 @@ def test_topmost_toggle_restores_position(tmp_path, app):
     assert win.pos() == pos
 
 
+def test_clamp_to_screens_keeps_intersecting_window():
+    """与任一屏幕相交的窗口保持不动（允许把窗口停在屏幕边缘）。"""
+    from PySide6.QtCore import QRect
+
+    from core.window_manager import clamp_to_screens
+
+    screens = [QRect(0, 0, 1536, 864), QRect(-3840, 0, 1920, 1200)]
+    assert clamp_to_screens(QRect(100, 100, 300, 200), screens) is None
+    # 窗口边缘探出左屏左侧：仍可见，不修正
+    assert clamp_to_screens(QRect(-200, 100, 300, 200), screens) is None
+
+
+def test_clamp_to_screens_recovers_window_outside_all_screens():
+    """完全在所有屏幕外的窗口拉回最近的屏幕（混合 DPI 布局）。"""
+    from PySide6.QtCore import QRect
+
+    from core.window_manager import clamp_to_screens
+
+    screens = [QRect(0, 0, 1536, 864), QRect(-3840, 0, 1920, 1200)]
+
+    # 被甩到右屏外面：拉回最近的左屏
+    pos = clamp_to_screens(QRect(5000, 300, 300, 200), screens)
+    assert pos is not None
+    assert screens[0].contains(QRect(pos.x(), pos.y(), 300, 200))
+
+    # 被甩到 UHD 左侧外面：拉回 UHD
+    pos = clamp_to_screens(QRect(-9000, 300, 300, 200), screens)
+    assert pos is not None
+    assert screens[1].contains(QRect(pos.x(), pos.y(), 300, 200))
+
+    # 落在两块屏幕逻辑坐标之间的空隙：也拉回最近的屏幕
+    pos = clamp_to_screens(QRect(-1500, 300, 300, 200), screens)
+    assert pos is not None
+    assert screens[1].contains(QRect(pos.x(), pos.y(), 300, 200))
+
+
+def test_ensure_on_screen_recovers_lost_window(tmp_path, app):
+    """窗口被拖出所有屏幕后，ensure_on_screen 把它拉回可见区域。"""
+    from PySide6.QtGui import QGuiApplication
+
+    _, _, win, _ = _make_window(tmp_path)
+    win.show()
+    _pump(app)
+    win.move(20000, 20000)
+    _pump(app)
+
+    win.ensure_on_screen()
+    _pump(app)
+
+    screen = QGuiApplication.primaryScreen().availableGeometry()
+    assert screen.contains(win.frameGeometry())
+
+
+def test_ensure_on_screen_keeps_visible_window(tmp_path, app):
+    """正常可见的窗口不被 ensure_on_screen 挪动。"""
+    from PySide6.QtCore import QPoint
+
+    _, _, win, _ = _make_window(tmp_path)
+    win.show()
+    _pump(app)
+    win.move(37, 53)
+    _pump(app)
+
+    win.ensure_on_screen()
+
+    assert win.pos() == QPoint(37, 53)
+
+
+def test_windows_drag_uses_system_move(tmp_path, app, monkeypatch):
+    """Windows 手动 move 会在跨屏时被 Qt 的坐标跳变甩飞，必须用原生拖动。"""
+    import types
+
+    from PySide6.QtCore import QPoint
+
+    from core import plugin_window
+
+    _, _, win, _ = _make_window(tmp_path)
+    win.show()
+    _pump(app)
+
+    calls = []
+
+    class Handle:
+        def startSystemMove(self):
+            calls.append(True)
+            return True
+
+    monkeypatch.setattr(win, "windowHandle", lambda: Handle())
+    monkeypatch.setattr(
+        plugin_window, "QGuiApplication",
+        types.SimpleNamespace(
+            platformName=lambda: "windows", screens=lambda: []),
+    )
+
+    win._drag_pos = QPoint(0, 0)
+    assert win._start_system_move() is True
+    assert calls == [True]
+    # 原生拖动已接管，后续 move 事件不再手动移动窗口
+    win._drag_pos = None
+
+
+def test_manual_drag_ignores_cross_screen_coordinate_jump(tmp_path, app):
+    """兜底手动拖动：全局坐标在屏幕边界跳变时不能把窗口甩出桌面。"""
+    from PySide6.QtCore import QPoint
+
+    _, _, win, _ = _make_window(tmp_path)
+    win.show()
+    _pump(app)
+    win.move(37, 53)
+    _pump(app)
+
+    win._drag_pos = QPoint(0, 0)
+    win._manual_drag(QPoint(3000, 0))  # 屏幕宽度的跳变，不是真实拖动
+    assert win.pos() == QPoint(37, 53)
+    assert win._drag_pos is None  # 结束本次拖动，窗口留在原地
+
+    # 正常的鼠标位移仍然跟随
+    win._drag_pos = QPoint(0, 0)
+    win._manual_drag(QPoint(30, 10))
+    assert win.pos() == QPoint(67, 63)
+
+
+def test_x11_drag_stays_manual(tmp_path, app, monkeypatch):
+    """X11 全局坐标连续：保持手动拖动，不把拖动交给系统。"""
+    import types
+
+    from core import plugin_window
+
+    _, _, win, _ = _make_window(tmp_path)
+    win.show()
+    _pump(app)
+
+    class Handle:
+        def startSystemMove(self):  # pragma: no cover - 不应被调用
+            raise AssertionError("X11 不应调用 startSystemMove")
+
+    monkeypatch.setattr(win, "windowHandle", lambda: Handle())
+    monkeypatch.setattr(
+        plugin_window, "QGuiApplication",
+        types.SimpleNamespace(
+            platformName=lambda: "xcb", screens=lambda: []),
+    )
+
+    assert win._start_system_move() is False
+    assert win._system_move_unsupported is True
+
+
+def test_wayland_ensure_on_screen_does_not_move_window(
+        tmp_path, app, monkeypatch):
+    """Wayland 坐标由 KWin 管理：ensure_on_screen 不能去 move 窗口。"""
+    from PySide6.QtCore import QPoint
+
+    _, _, win, _ = _make_window(tmp_path)
+    win.show()
+    _pump(app)
+    win.move(20000, 20000)
+    _pump(app)
+    monkeypatch.setattr(win, "_is_wayland", lambda: True)
+
+    win.ensure_on_screen()
+
+    assert win.pos() == QPoint(20000, 20000)
+
+
 def test_wayland_topmost_toggle_does_not_remap_window(tmp_path, app, monkeypatch):
     """Wayland 用 KWin 切换置顶，不能通过 setWindowFlags 触发居中。"""
     from core import plugin_window
