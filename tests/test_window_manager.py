@@ -665,3 +665,193 @@ def test_settings_list_excludes_closed_sections(tmp_path, app):
     # 隐藏分区 p1 仍留在原槽位（配置与运行时一致）
     assert win.plugin_ids == ["p1", "p2"]
     assert cfg.get("windows", "main", "plugins") == ["p1", "p2"]
+
+
+def test_win_topmost_reports_foreign_window_above(monkeypatch):
+    """z-order 上方压着其他进程的非置顶窗口 → 判定为异常层级。"""
+    import os
+
+    from core import win_topmost
+
+    rects = {
+        10: (0, 0, 300, 200),   # 本窗口
+        20: (0, 0, 0, 0),       # 不可见/无面积辅助窗口：跳过
+        30: (50, 50, 250, 150),  # 其他进程普通窗口，遮挡本窗口
+    }
+    chain = {10: 20, 20: 30, 30: 0}
+
+    class Api:
+        def rect(self, h):
+            return rects.get(h)
+
+        def window_above(self, h):
+            return chain.get(h, 0)
+
+        def is_visible(self, h):
+            return h != 20
+
+        def is_minimized(self, h):
+            return False
+
+        def is_cloaked(self, h):
+            return False
+
+        def has_topmost(self, h):
+            return False
+
+        def pid(self, h):
+            return 999 if h == 30 else os.getpid()
+
+    monkeypatch.setattr(win_topmost, "_api", Api())
+    assert win_topmost.occluding_intruder(10) == 30
+
+
+def test_win_topmost_ignores_topmost_and_own_windows(monkeypatch):
+    """上方是置顶窗口或本进程窗口（自己的对话框）都不算异常。"""
+    import os
+
+    from core import win_topmost
+
+    rects = {10: (0, 0, 300, 200), 20: (50, 50, 250, 150)}
+    chain = {10: 20, 20: 0}
+
+    class Api:
+        def __init__(self, topmost, pid):
+            self._topmost = topmost
+            self._pid = pid
+
+        def rect(self, h):
+            return rects.get(h)
+
+        def window_above(self, h):
+            return chain.get(h, 0)
+
+        def is_visible(self, h):
+            return True
+
+        def is_minimized(self, h):
+            return False
+
+        def is_cloaked(self, h):
+            return False
+
+        def has_topmost(self, h):
+            return self._topmost
+
+        def pid(self, h):
+            return self._pid
+
+    monkeypatch.setattr(win_topmost, "_api", Api(topmost=True, pid=999))
+    assert win_topmost.occluding_intruder(10) is None
+
+    monkeypatch.setattr(
+        win_topmost, "_api", Api(topmost=False, pid=os.getpid()))
+    assert win_topmost.occluding_intruder(10) is None
+
+
+def test_win_topmost_repair_restores_lost_flag(monkeypatch):
+    """原生置顶位丢失时重新 SetWindowPos(HWND_TOPMOST)。"""
+    from core import win_topmost
+
+    class Widget:
+        def winId(self):
+            return 10
+
+    calls = []
+
+    class Api:
+        has_topmost_value = False
+
+        def has_topmost(self, h):
+            return self.has_topmost_value
+
+        def set_topmost(self, h, on):
+            calls.append((h, on))
+            self.has_topmost_value = on
+            return True
+
+    api = Api()
+    monkeypatch.setattr(win_topmost, "_api", api)
+
+    assert win_topmost.repair_if_needed(Widget()) == "原生置顶属性丢失"
+    assert calls == [(10, True)]
+    # 已恢复：再次检查无需修复
+    monkeypatch.setattr(win_topmost, "occluding_intruder", lambda hwnd: None)
+    assert win_topmost.repair_if_needed(Widget()) is None
+
+
+def test_topmost_guard_repairs_broken_window(tmp_path, app, monkeypatch):
+    """守护定时器检测到置顶被破坏时重新置顶，并在恢复正常后复位告警。"""
+    from core import plugin_window
+
+    _, _, win, _ = _make_window(tmp_path)
+    win.show()
+    _pump(app)
+
+    calls = []
+    monkeypatch.setattr(win, "_is_windows_native", lambda: True)
+    monkeypatch.setattr(
+        plugin_window.win_topmost, "repair_if_needed",
+        lambda widget: (calls.append(widget)
+                        or "被非置顶窗口 0x1 遮挡"))
+
+    win._topmost_repair_logged = False
+    win._guard_topmost()
+    assert calls == [win]
+    assert win._topmost_repair_logged
+
+    monkeypatch.setattr(
+        plugin_window.win_topmost, "repair_if_needed", lambda widget: None)
+    win._guard_topmost()
+    assert not win._topmost_repair_logged
+
+
+def test_topmost_guard_skips_off_or_hidden_windows(
+        tmp_path, app, monkeypatch):
+    """关闭置顶或窗口隐藏时守护不做任何原生操作。"""
+    from core import plugin_window
+
+    _, _, win, _ = _make_window(tmp_path)
+    win.show()
+    _pump(app)
+
+    calls = []
+    monkeypatch.setattr(win, "_is_windows_native", lambda: True)
+    monkeypatch.setattr(
+        plugin_window.win_topmost, "repair_if_needed",
+        lambda widget: calls.append(widget))
+
+    win.apply_topmost(False)
+    _pump(app)
+    win._guard_topmost()
+    assert calls == []
+
+    win.apply_topmost(True)
+    _pump(app)
+    win.hide()
+    _pump(app)
+    win._guard_topmost()
+    assert calls == []
+
+
+def test_windows_topmost_toggle_reasserts_native_flag(
+        tmp_path, app, monkeypatch):
+    """Windows 下切换置顶后显式按原生层级再设置一次。"""
+    from core import plugin_window
+
+    _, _, win, _ = _make_window(tmp_path)
+    win.show()
+    _pump(app)
+
+    seen = []
+    monkeypatch.setattr(win, "_is_windows_native", lambda: True)
+    monkeypatch.setattr(
+        plugin_window.win_topmost, "set_native_topmost",
+        lambda hwnd, on=True: seen.append((hwnd, on)) or True)
+
+    win.apply_topmost(False)
+    win.apply_topmost(True)
+
+    assert seen and all(hwnd for hwnd, _ in seen)
+    assert any(on is False for _, on in seen)
+    assert seen[-1][1] is True

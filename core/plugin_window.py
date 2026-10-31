@@ -12,6 +12,7 @@ from PySide6.QtGui import QAction, QColor, QGuiApplication
 from PySide6.QtWidgets import QDialog, QLayout, QMenu, QVBoxLayout, QWidget
 
 import core.theme as theme
+import core.win_topmost as win_topmost
 from core.kwin import (
     caption_token,
     is_kde_session,
@@ -91,6 +92,45 @@ class PluginWindow(QWidget):
             self.config.get("window", "opacity", default=0.92),
         )
         self._build_menu()
+
+        # Windows 的置顶层级可能被其他程序弄乱（见 core.win_topmost），
+        # Qt 只在创建/切换 flag 时设置一次，之后不会自愈；定期检查并
+        # 把窗口重新压回置顶层顶部。
+        self._topmost_repair_logged = False
+        self._topmost_guard = None
+        if win_topmost.is_supported():
+            guard = QTimer(self)
+            guard.setInterval(500)
+            guard.timeout.connect(self._guard_topmost)
+            guard.start()
+            self._topmost_guard = guard
+
+    def _is_windows_native(self) -> bool:
+        return (win_topmost.is_supported()
+                and QGuiApplication.platformName().startswith("windows"))
+
+    def showEvent(self, event) -> None:
+        """窗口映射后确保原生置顶层正确（隐藏/恢复后也生效）。"""
+        super().showEvent(event)
+        if self._topmost and self._is_windows_native():
+            win_topmost.set_native_topmost(int(self.winId()), True)
+
+    def _guard_topmost(self) -> None:
+        """Windows：定期确认仍在置顶层，且没有被普通窗口压住。"""
+        if not self._topmost or not self.isVisible():
+            return
+        if not self._is_windows_native():
+            return
+        reason = win_topmost.repair_if_needed(self)
+        if reason is None:
+            self._topmost_repair_logged = False
+            return
+        if self._topmost_repair_logged:
+            log.debug("窗口 %s 置顶已恢复（%s）", self.window_id, reason)
+        else:
+            log.warning("窗口 %s 置顶被破坏（%s），已重新置顶",
+                        self.window_id, reason)
+            self._topmost_repair_logged = True
 
     # ---- 管理器 ----
 
@@ -513,6 +553,8 @@ class PluginWindow(QWidget):
         # setWindowFlags() may finish recreating the native window after this
         # call; repeat the move once the remap has been processed.
         QTimer.singleShot(0, lambda p=pos: self.move(p))
+        if self._is_windows_native():
+            win_topmost.set_native_topmost(int(self.winId()), on)
         if is_kde_session():
             set_keepabove(on, self.window_id, self._kwin_position)
 

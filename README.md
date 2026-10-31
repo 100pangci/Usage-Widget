@@ -196,8 +196,10 @@ Cookie、Netscape/JSON Cookie 文件，以及 Codex CLI 的 `~/.codex/auth.json`
   `setWindowFlags`）后脚本监听 `windowAdded` 自动补设。非 KDE 会话
   自动回退到 Qt hint。Wayland 下窗口坐标由 KWin 脚本读取并通过会话
   D-Bus 回传，因此主窗口和独立窗口都支持位置记忆。
-- **Windows / 非 KDE Linux（X11）**：置顶走 Qt `WindowStaysOnTopHint`，
-  X11 下位置记忆（`window.position`）正常生效。
+- **Windows / 非 KDE Linux（X11）**：置顶走 Qt `WindowStaysOnTopHint`；
+  Windows 另有原生置顶守护（`core/win_topmost.py`），其他程序把窗口层级
+  弄乱时会自动把悬浮窗重新压回置顶层顶部。X11 下位置记忆
+  （`window.position`）正常生效。
 - **非 KDE Wayland**：Wayland 协议不向应用暴露全局窗口坐标，位置记忆仍不可用。
 
 ## 目录结构
