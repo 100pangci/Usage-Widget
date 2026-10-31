@@ -536,6 +536,92 @@ def _dialog_list_texts(dialog) -> list[str]:
             for i in range(dialog._plugin_list.count())]
 
 
+def test_settings_dialog_follows_topmost_window(tmp_path, app):
+    """置顶窗口的设置对话框也要置顶，否则会被父窗口盖住（Linux/X11）。
+
+    父窗口带 WindowStaysOnTopHint 时位于 Above 层，普通子对话框仍在
+    普通层，打开后会显示在主窗口下方；对话框必须跟随父窗口置顶。
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QDialog
+
+    _, _, win, _ = _make_window(tmp_path)
+    win.show()
+    _pump(app)
+    assert win.topmost
+
+    class FakeDialog(QDialog):
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    dialog = FakeDialog(win)
+    assert win.exec_dialog(dialog) == QDialog.DialogCode.Accepted
+    assert dialog.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
+
+    # 未置顶的窗口：对话框保持普通层级，不能强行置顶压住其他应用
+    win.apply_topmost(False)
+    _pump(app)
+    dialog = FakeDialog(win)
+    win.exec_dialog(dialog)
+    assert not (dialog.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
+
+
+def test_system_settings_dialog_opens_via_exec_dialog(
+        tmp_path, app, monkeypatch):
+    """「系统设置…」入口必须走 exec_dialog，让对话框继承置顶状态。"""
+    from PySide6.QtWidgets import QDialog
+
+    import core.system_settings_dialog as settings_module
+
+    seen = []
+
+    class FakeSettingsDialog:
+        def __init__(self, config, window, parent=None):
+            self.flag = None
+            seen.append(self)
+
+        def setWindowFlag(self, flag, on=True):
+            self.flag = (flag, on)
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(
+        settings_module, "SystemSettingsDialog", FakeSettingsDialog)
+    cfg, mgr, win, wm = _make_window(tmp_path)
+
+    win._open_system_settings()
+
+    assert len(seen) == 1
+    assert seen[0].flag[1] is True
+
+
+def test_plugin_settings_dialog_opens_via_exec_dialog(
+        tmp_path, app, monkeypatch):
+    """插件设置入口（主窗口与独立窗口）同样走 exec_dialog。"""
+    from PySide6.QtWidgets import QDialog
+
+    cfg, mgr, win, wm = _make_window(tmp_path)
+    plugin = mgr.plugins["p1"]
+    seen = []
+
+    class FakeDialog(QDialog):
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    def fake_settings_dialog(parent=None):
+        dialog = FakeDialog(parent)
+        seen.append(dialog)
+        return dialog
+
+    monkeypatch.setattr(plugin, "settings_dialog", fake_settings_dialog)
+
+    win._open_plugin_settings_dlg(plugin)
+    win._open_plugin_settings()
+
+    assert len(seen) == 2
+
+
 def test_settings_save_order_applies_and_not_reverted(tmp_path, app):
     """系统设置排序保存：运行时顺序立即生效，后续 persist 不回滚配置。
 

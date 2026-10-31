@@ -9,7 +9,7 @@ import logging
 
 from PySide6.QtCore import QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QGuiApplication
-from PySide6.QtWidgets import QLayout, QMenu, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QDialog, QLayout, QMenu, QVBoxLayout, QWidget
 
 import core.theme as theme
 from core.kwin import (
@@ -521,13 +521,26 @@ class PluginWindow(QWidget):
         if self._manager is not None:
             self._manager.persist()
 
+    def exec_dialog(self, dialog) -> int:
+        """模态显示对话框，并让对话框跟随本窗口的置顶状态。
+
+        X11 下置顶的父窗口位于 Above 层，子对话框默认仍在普通层，
+        会被父窗口盖住（Linux 桌面常见）。打开前给对话框补上同样的
+        置顶标志，对话框才显示在父窗口之上。Wayland 下客户端无法
+        自行置顶，KWin 会按 transient 关系保证对话框在父窗口之上，
+        设置该标志无副作用。
+        """
+        if dialog is None:
+            return QDialog.DialogCode.Rejected
+        if self.topmost:
+            dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        return dialog.exec()
+
     def _open_plugin_settings(self) -> None:
         # 对每个插件依次打开设置（简化为第一个）
         if self._plugins:
             first = next(iter(self._plugins.values()))
-            dialog = first.settings_dialog(self)
-            if dialog is not None:
-                dialog.exec()
+            self.exec_dialog(first.settings_dialog(self))
 
     # ---- 合并 ----
 

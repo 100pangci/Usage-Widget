@@ -211,7 +211,8 @@ class FloatingWindow(PluginWindow):
         except Exception:
             log.exception("插件 %s 设置对话框打开失败", plugin.id)
             return
-        if dialog is not None and dialog.exec() == QDialog.DialogCode.Accepted:
+        if (dialog is not None
+                and self.exec_dialog(dialog) == QDialog.DialogCode.Accepted):
             self._rebuild_plugin_section(plugin)
 
     def _rebuild_plugin_section(self, plugin) -> None:
@@ -289,7 +290,7 @@ class FloatingWindow(PluginWindow):
         from core.system_settings_dialog import SystemSettingsDialog
 
         dialog = SystemSettingsDialog(self.config, self, self)
-        dialog.exec()
+        self.exec_dialog(dialog)
 
     # ---- 重载/配置 ----
 
